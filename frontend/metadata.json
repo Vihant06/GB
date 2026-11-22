@@ -1,0 +1,6 @@
+{
+  "name": "Wayne Chat Workspace",
+  "description": "One-to-one chat session interface with live contact filtering, inline PDF print cards, and simulated contact replies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

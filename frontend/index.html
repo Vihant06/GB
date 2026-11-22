@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wayne Chat Workspace — One-to-One Chat Session</title>
+    <meta
+      name="description"
+      content="One-to-one Gemini chat workspace with a New Chat home launcher, streaming responses, and warm light and dark themes."
+    />
+    <meta property="og:title" content="Wayne Chat Workspace — One-to-One Chat Session" />
+    <meta
+      property="og:description"
+      content="One-to-one Gemini chat workspace with a New Chat home launcher, streaming responses, and warm light and dark themes."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      try {
+        if (localStorage.getItem('wayne-chat-theme') === 'dark') {
+          document.documentElement.classList.add('dark');
+        }
+      } catch (e) {}
+    </script>
+  </head>
+  <body class="bg-[#FAFAF5] dark:bg-[#181815] text-[#111111] dark:text-[#ECEBE4] antialiased selection:bg-[#9BD5F7] dark:selection:bg-[#7DB9DE] selection:text-[#111111]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

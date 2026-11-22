@@ -1,0 +1,30 @@
+[project]
+name = "gb"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Vihant06", email = "vihantmhabadi947@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "gitpython>=3.1.43",
+    "ipykernel>=6.29.5",
+    "langchain-core>=0.3.28",
+    "langchain-nvidia-ai-endpoints>=0.3.7",
+    "langgraph>=0.2.60",
+    "psycopg[binary]>=3.2.3",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.1",
+    "qdrant-client>=1.12.1",
+    "sqlalchemy>=2.0.36",
+    "tree-sitter>=0.23.2",
+    "tree-sitter-python>=0.23.5",
+]
+
+[project.scripts]
+gb = "gb:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"

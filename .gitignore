@@ -1,0 +1,38 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments & Secrets
+.venv/
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# SQLite databases & repository cache files
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+**/repomind_knowledge.db*
+**/repositories/
+backend/data/repomind_knowledge.db*
+backend/data/repositories/
+
+# Node / Frontend
+node_modules/
+.npm-cache/
+dist/
+**/node_modules/
+**/dist/
