@@ -146,7 +146,8 @@ RATE_CFG = RateLimitConfig()
 # LLM Models
 PRIMARY_MODEL = os.getenv("REPOMIND_PRIMARY_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
 FAST_MODEL = os.getenv("REPOMIND_FAST_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
-GROQ_MODEL = os.getenv("REPOMIND_GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_FAST_MODEL = os.getenv("REPOMIND_GROQ_FAST_MODEL", "openai/gpt-oss-20b")
+GROQ_MODEL = os.getenv("REPOMIND_GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 def create_chat_nvidia(model_name: str, max_tokens: int = 8192, temperature: float = 0.0):
@@ -173,7 +174,7 @@ def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float
 # Lazily or direct instantiated clients (prefer Groq for low-latency if GROQ_API_KEY is configured)
 try:
     if GROQ_API_KEY:
-        fast_llm = create_chat_groq(GROQ_MODEL, max_tokens=2048, temperature=0.0)
+        fast_llm = create_chat_groq(GROQ_FAST_MODEL, max_tokens=2048, temperature=0.0)
         if os.getenv("REPOMIND_PREFER_NIM_PRIMARY", "false").lower() in ("true", "1", "yes") and NVIDIA_API_KEY:
             llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
         else:
