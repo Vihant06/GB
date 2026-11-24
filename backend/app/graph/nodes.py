@@ -393,7 +393,7 @@ def run_test_intel(state: dict):
 
 PLANNER_PROMPT = """You are the Orchestrator Planner for RepoMind.
 Route the developer's query to 1 to 4 parallel specialist tasks:
-- repository_intelligence: local code execution flow, repository layout, README/manifests, Context7 library docs, and Firecrawl external doc ingestion.
+- repository_intelligence: local code execution flow, repository layout, README/manifests, Context7 library docs, Firecrawl external doc ingestion, AND extracting actual data content from files.
 - debugging: runtime errors, exceptions, GitHub Issues, GitHub Actions CI failures, Exa web search, and Context7 docs.
 - change_impact: blast radius of code edits, callers, importers, broken APIs/tests, and migration docs.
 - test_intelligence: existing test cases, assertions, test coverage, and untested methods.
@@ -401,8 +401,9 @@ Route the developer's query to 1 to 4 parallel specialist tasks:
 Critical planning rules:
 1. On Attempt 1, if a query combines independent sources (e.g. Firecrawl URL + Context7 docs + local code), dispatch them as SEPARATE parallel tasks.
 2. When the user asks what the repository does, its purpose, architecture, or an overview: dispatch 'repository_intelligence' with a sub_query instructed to list files, read the README, inspect project manifests (package.json, requirements.txt, pyproject.toml), and inspect main entrypoints (e.g. app.js, app.py, main.py).
-3. When dispatching a Firecrawl task, keep concrete technical keywords in the sub_query (e.g. 'Transport Adapters HTTPAdapter Retry mount') so FTS5 retrieves the exact section—never ask vaguely for 'full documentation'.
-4. On Attempt 2, ONLY dispatch tasks for the specific gaps listed in Missing Information Feedback; do NOT re-run sources already present in Already Collected Evidence."""
+3. When the user asks about DATA contained in files (e.g. 'list questions', 'show entries', 'what are the top items'), dispatch 'repository_intelligence' with a sub_query that instructs reading the relevant data files and EXTRACTING the actual content values.
+4. When dispatching a Firecrawl task, keep concrete technical keywords in the sub_query (e.g. 'Transport Adapters HTTPAdapter Retry mount') so FTS5 retrieves the exact section—never ask vaguely for 'full documentation'.
+5. On Attempt 2, ONLY dispatch tasks for the specific gaps listed in Missing Information Feedback; do NOT re-run sources already present in Already Collected Evidence."""
 
 
 def orchestrator_plan_node(state: RepoMindState):
@@ -647,10 +648,11 @@ def no_evidence_exit_node(state: RepoMindState):
     curr_repo = get_repo_full_name()
     return {
         "final_report": (
-            f"# RepoMind Engineering Report\n\n"
             f"No verified code, test, issue, or documentation evidence was found in `{curr_repo}` "
-            f"for query: `{state['user_query']}`.\n\n"
-            "Try referencing a specific module, symbol, exception, test, or issue in the repository."
+            f"for your query: *{state['user_query']}*\n\n"
+            "**Suggestions:**\n"
+            "- Try referencing a specific module, file, symbol, exception, test, or issue in the repository.\n"
+            "- Make sure the repository is cloned and accessible."
         ),
         "trace_logs": ["[No Evidence Exit] Skipped synthesis after 0 verified citations."],
     }
@@ -680,9 +682,16 @@ def orchestrator_synthesize_node(state: RepoMindState):
     sys_msg = SystemMessage(
         content=(
             "/no_think\n"
-            "You are the Lead Engineering Responder for RepoMind. "
-            "Write a complete, comprehensive, and strictly grounded Markdown engineering report using ONLY the verified evidence. "
-            "Ensure all explanations and sentences are completely finished."
+            "You are the Lead Engineering Responder for RepoMind.\n"
+            "Your PRIMARY job is to DIRECTLY ANSWER the developer's question using the verified evidence.\n\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. Read the Developer Query carefully. Answer EXACTLY what they asked.\n"
+            "2. If they ask for a list (e.g. 'top 5 questions', 'list all endpoints'), give them that list directly.\n"
+            "3. If they ask about data or content in files (e.g. questions, configs, entries), extract and present that DATA—do NOT describe the code structure that processes it.\n"
+            "4. If they ask about architecture or how code works, then explain the architecture.\n"
+            "5. NEVER produce a meta-description of the codebase when the user wants actual content/data from files.\n"
+            "6. Keep your answer focused and concise. Use bullet points and headers only when they help clarity.\n"
+            "7. Do NOT start with 'Engineering Report' headers unless the user explicitly asked for a report."
         )
     )
     synth_prompt = f"""Rules:
@@ -692,6 +701,7 @@ def orchestrator_synthesize_node(state: RepoMindState):
 4. NEVER attribute class fields/methods to local classes unless confirmed in local source code evidence.
 5. ONLY include sections that have verified evidence—completely OMIT empty sections.
 6. Provide thorough, complete answers without cutting off or ending mid-sentence.
+7. ANSWER the question directly first, then provide supporting evidence. Do NOT just describe how the code is structured.
 
 Developer Query:
 {state['user_query']}

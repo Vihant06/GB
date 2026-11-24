@@ -386,7 +386,7 @@ export function ChatSessionPane({
                 ) : (
                   (message.text || message.progressStep || message.isStreaming) && (
                     <div
-                      className={`max-w-[88%] sm:max-w-[82%] rounded-[18px] border-[1.75px] border-[#111111] dark:border-[#42413A] px-4 py-3 shadow-[0_3px_0_0_#111111] dark:shadow-[0_3px_0_0_#0E0E0C] ${
+                      className={`max-w-[88%] sm:max-w-[82%] rounded-[18px] border-[1.75px] border-[#111111] dark:border-[#42413A] px-4 py-3 shadow-[0_3px_0_0_#111111] dark:shadow-[0_3px_0_0_#0E0E0C] overflow-hidden break-words ${
                         isUser
                           ? 'bg-white dark:bg-[#2E2E28]'
                           : 'bg-white dark:bg-[#262621]'

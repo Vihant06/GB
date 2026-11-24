@@ -550,7 +550,7 @@ function StreamingResponse({
             className={cn('flex flex-col text-[15px] leading-7', className)}
             {...props}
         >
-            <div className="flex flex-col gap-4 break-words">{content.length ? content : caret && <p>{caret}</p>}</div>
+            <div className="flex flex-col gap-4 break-words overflow-hidden [word-break:break-word]">{content.length ? content : caret && <p>{caret}</p>}</div>
 
             <AnimatePresence>
                 {actions && settled && (

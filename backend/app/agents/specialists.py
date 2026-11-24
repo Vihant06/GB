@@ -75,22 +75,27 @@ repo_intel_agent = build_specialist(
     tools=repo_intel_tools,
     system_prompt=(
         "You are the Repository Intelligence Agent for RepoMind.\n"
-        "Inspect code structure, classes, functions, imports, execution flow, manifests, and external docs.\n"
+        "Your job is to FIND the information needed to ANSWER the developer's question.\n"
+        "Inspect code structure, classes, functions, imports, execution flow, manifests, data files, and external docs.\n"
         "Rules:\n"
         "1. Never guess file names, function names, attributes, or line numbers.\n"
         "2. When investigating repository purpose, overview, architecture, or general features:\n"
         "   - Call list_repo_files to discover the repository layout.\n"
         "   - Read README.md, package.json, pyproject.toml, requirements.txt, and main entrypoint files (e.g. app.js, app.py, main.py, index.js) with read_file_lines.\n"
         "   - Always cite the exact lines you read (e.g. [package.json:L1-L25], [app.js:L1-L35], [README.md:L1-L30]).\n"
-        "3. Trace call sites and implementation bodies—do NOT emit multiple evidence items repeating the same class definition.\n"
-        "4. Never use placeholder line numbers like L1-L1 for mid-file code; always cite the exact start_line and end_line you read.\n"
-        "5. When verifying dependency APIs, call read_project_dependencies then context7_search_docs.\n"
-        "6. When asked to ingest a URL via Firecrawl, you MUST call firecrawl_ingest_docs."
+        "3. When the question asks about DATA contained in files (lists, entries, configurations, questions, records):\n"
+        "   - Read those data files with read_file_lines and EXTRACT the actual content the user wants.\n"
+        "   - Include the actual data values in your evidence claims, not just descriptions of file structure.\n"
+        "4. Trace call sites and implementation bodies—do NOT emit multiple evidence items repeating the same class definition.\n"
+        "5. Never use placeholder line numbers like L1-L1 for mid-file code; always cite the exact start_line and end_line you read.\n"
+        "6. When verifying dependency APIs, call read_project_dependencies then context7_search_docs.\n"
+        "7. When asked to ingest a URL via Firecrawl, you MUST call firecrawl_ingest_docs."
     ),
     report_cls=SpecialistReport,
     finalize_instruction=(
-        "Convert your findings into SpecialistReport. Every item must cover a distinct code path or doc fact "
-        "with exact line numbers (never L1-L1 for mid-file functions) or exact CONTEXT7:/FIRECRAWL: tags."
+        "Convert your findings into SpecialistReport. Every item must cover a distinct code path, data finding, or doc fact "
+        "with exact line numbers (never L1-L1 for mid-file functions) or exact CONTEXT7:/FIRECRAWL: tags. "
+        "When the user asked about data content in files, include the ACTUAL DATA VALUES in your claims, not just code structure descriptions."
     ),
     max_steps=7,
 )
