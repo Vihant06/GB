@@ -128,20 +128,13 @@ def classify_query_llm(query: str) -> tuple[str, str]:
     if any(part in q_lower for part in repo_parts if len(part) > 2):
         return "repo_specific", f"Query explicitly references '{current_repo_name}'."
 
-    # Fast deterministic repo_specific check for code symbols, file extensions, or FTS5 symbol hits
+    # Fast deterministic repo_specific check for explicit code symbols or file extensions
     if (
         re.search(r"\b[A-Z][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b", query)
         or re.search(r"\b[A-Za-z0-9_./-]+\.(?:py|js|ts|tsx|jsx|md|toml|json|yaml|yml)\b", query)
-        or re.search(r"\b(?:__\w+__|def\s+\w+|class\s+\w+|apirouter|decorator|endpoint|wsgi|openapi)\b", q_lower)
+        or re.search(r"\b(?:__\w+__|apirouter|wsgi|openapi)\b", q_lower)
     ):
         return "repo_specific", f"Query references code symbols or files in '{current_repo_name}'."
-
-    if current_repo_name:
-        try:
-            if query_repo_symbols_fts(current_repo_name, query, limit=1):
-                return "repo_specific", f"Query matched indexed symbols in '{current_repo_name}'."
-        except Exception:
-            pass
 
     if fast_llm is None and llm is None:
         # Fallback for offline testing without active LLM
@@ -153,8 +146,9 @@ def classify_query_llm(query: str) -> tuple[str, str]:
             f"You are a strict router for RepoMind, which indexes the repository '{current_repo_name}'.\n"
             "Classify the user query into exactly one route:\n"
             "1. 'off_topic': Completely unrelated to software engineering, programming, or coding (e.g. food, sports, travel).\n"
-            "2. 'general_coding': Pure programming language syntax or theoretical algorithm questions that are completely generic "
-            f"and do NOT relate to the project '{current_repo_name}' or its source files.\n"
+            "2. 'general_coding': Generic programming, algorithm, DSA, syntax, or how-to coding requests (e.g. 'Python code for Fibonacci', "
+            "'how to sort a list in JS') that do NOT ask about the indexed repository "
+            f"'{current_repo_name}' or its source files.\n"
             f"3. 'repo_specific': Any question about '{current_repo_name}', this repository, this project, its purpose, "
             "architecture, source code, functions, classes, tests, or issues."
         )
