@@ -33,34 +33,82 @@ function getAiStatusState(step?: string): 'thinking' | 'researching' | 'analyzin
 
 function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): WebSource[] {
   const sources: WebSource[] = [];
-  if (repo) {
-    sources.push({
-      id: 'repo-target',
-      title: `${repo.name} AST Index`,
-      url: repo.url,
-      snippet: `Indexed code AST symbols (${repo.pythonFilesCount || repo.filesCount || 0} files) ready for RAG`,
-    });
+  const seenIds = new Set<string>();
+
+  // 1. Extract verified file citations from message text (e.g. [app/main.py:L14-L45] or [file:app/main.py:L14-L45])
+  if (message.text) {
+    const citationRegex = /\[(?:file:)?([^:\]\s]+)(?::L(\d+)(?:-L(\d+))?)?\]/g;
+    let match;
+    while ((match = citationRegex.exec(message.text)) !== null) {
+      const rawPath = match[1];
+      const startLine = match[2];
+      const endLine = match[3];
+      if (rawPath && !rawPath.startsWith('http') && !rawPath.includes(' ') && !seenIds.has(rawPath)) {
+        seenIds.add(rawPath);
+        const lineFragment = startLine ? (endLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`) : '';
+        const lineLabel = startLine ? (endLine ? `:L${startLine}-L${endLine}` : `:L${startLine}`) : '';
+        const url = repo ? `${repo.url}/blob/main/${rawPath}${lineFragment}` : `#${rawPath}`;
+        sources.push({
+          id: `citation-${rawPath}`,
+          title: `${rawPath}${lineLabel}`,
+          url,
+          snippet: `Verified line-level codebase citation from ${rawPath}`,
+        });
+      }
+    }
   }
+
+  // 2. Extract external doc searches, crawled pages, and GitHub syncs from trace logs
   if (message.traceLogs) {
-    const fileMatches = new Set<string>();
     for (const log of message.traceLogs) {
-      const matches = log.match(/\[file:([^\s:\]]+)/g);
-      if (matches) {
-        for (const m of matches) {
-          const path = m.replace('[file:', '').trim();
-          if (path && !fileMatches.has(path) && repo) {
-            fileMatches.add(path);
-            sources.push({
-              id: `file-${path}`,
-              title: path,
-              url: `${repo.url}/blob/main/${path}`,
-              snippet: `Verified line-level AST grounded evidence from ${path}`,
-            });
-          }
+      if (log.includes('[Context7]') || log.includes('Context7')) {
+        const id = 'ext-context7';
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          sources.push({
+            id,
+            title: 'Context7 Technical Documentation',
+            url: 'https://context7.com',
+            snippet: log.replace(/^\[Context7\]\s*/, '').slice(0, 140),
+          });
+        }
+      } else if (log.includes('[Exa]') || log.includes('Exa search')) {
+        const id = 'ext-exa';
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          sources.push({
+            id,
+            title: 'Exa Live Web Search',
+            url: 'https://exa.ai',
+            snippet: log.replace(/^\[Exa\]\s*/, '').slice(0, 140),
+          });
+        }
+      } else if (log.includes('[Firecrawl]') || log.includes('Firecrawl')) {
+        const id = 'ext-firecrawl';
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          sources.push({
+            id,
+            title: 'Firecrawl Crawled Documentation',
+            url: 'https://firecrawl.dev',
+            snippet: log.replace(/^\[Firecrawl\]\s*/, '').slice(0, 140),
+          });
+        }
+      } else if (log.includes('GitHub issues') || log.includes('GitHub CI')) {
+        const id = 'ext-github-sync';
+        if (!seenIds.has(id)) {
+          seenIds.add(id);
+          sources.push({
+            id,
+            title: repo ? `${repo.name} Issues & CI Runs` : 'GitHub Issues & CI',
+            url: repo ? `${repo.url}/issues` : 'https://github.com',
+            snippet: log.slice(0, 140),
+          });
         }
       }
     }
   }
+
   return sources;
 }
 
@@ -344,25 +392,31 @@ export function ChatSessionPane({
                           : 'bg-white dark:bg-[#262621]'
                       }`}
                     >
-                      {/* 1. Live AiStatus when assistant is working */}
-                      {!isUser && message.isStreaming && (
+                      {/* 1. Live AiStatus: ONLY active when assistant is currently streaming and working on an investigation step */}
+                      {!isUser && message.isStreaming && Boolean(message.progressStep) && (
                         <div className="mb-3">
                           <AiStatus
                             state={getAiStatusState(message.progressStep)}
-                            label={message.progressStep || 'Investigating codebase...'}
+                            label={message.progressStep}
                             timer={true}
                             className="font-mono text-xs"
                           />
                         </div>
                       )}
 
-                      {/* 2. WebSearch & AST Grounded Sources Card */}
+                      {/* 2. WebSearch: ONLY rendered when external web/docs search or verified citations were actually invoked */}
                       {!isUser && getSourcesForMessage(message, effectiveRepo).length > 0 && !message.isStreaming && (
                         <div className="mb-3">
                           <WebSearch
-                            query={effectiveRepo ? `AST Index: ${effectiveRepo.name}` : 'Codebase Investigation'}
+                            query={
+                              getSourcesForMessage(message, effectiveRepo).some((s) => s.id.startsWith('ext-'))
+                                ? 'External Documentation & Web Search'
+                                : effectiveRepo
+                                ? `${effectiveRepo.name} Verified Sources`
+                                : 'Verified Codebase Citations'
+                            }
                             sources={getSourcesForMessage(message, effectiveRepo)}
-                            status={message.isStreaming ? 'searching' : 'done'}
+                            status="done"
                             className="w-full font-mono text-xs"
                           />
                         </div>

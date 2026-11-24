@@ -18,10 +18,10 @@ import {
 const THEME_STORAGE_KEY = 'wayne-chat-theme';
 
 const POPULAR_REPOS = [
-  {name: 'psf/requests', desc: 'Python HTTP library for humans'},
-  {name: 'pallets/flask', desc: 'Lightweight WSGI web framework'},
+  {name: 'pallets/flask', desc: 'Lightweight WSGI Python web framework'},
   {name: 'fastapi/fastapi', desc: 'Modern high-performance web API framework'},
   {name: 'encode/starlette', desc: 'Async ASGI web framework toolkit'},
+  {name: 'tiangolo/sqlmodel', desc: 'SQL databases in Python with Pydantic & SQLAlchemy'},
 ];
 
 function getInitialTheme(): ThemeMode {
@@ -598,7 +598,7 @@ export default function App() {
                   type="text"
                   value={modalRepoInput}
                   onChange={(e) => setModalRepoInput(e.target.value)}
-                  placeholder="https://github.com/psf/requests or pallets/flask"
+                  placeholder="e.g. owner/repo or https://github.com/owner/repo"
                   disabled={isIndexingRepo}
                   className="w-full h-11 px-3.5 rounded-xl border-[1.5px] border-[#111111] dark:border-[#42413A] bg-[#FAFAF5] dark:bg-[#282823] font-mono text-xs text-[#111111] dark:text-[#ECEBE4] placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-[#9BD5F7]"
                   autoFocus

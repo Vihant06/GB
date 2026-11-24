@@ -47,21 +47,30 @@ class RateLimitConfig:
 
 # Dynamic Repository and Path Configuration
 _default_data_dir = BASE_DIR / "data"
-_default_repo_path = _default_data_dir / "repositories" / "requests"
+_default_repositories_dir = _default_data_dir / "repositories"
+_default_repo_path = _default_repositories_dir / "active_repo"
 _default_db_path = _default_data_dir / "repomind_knowledge.db"
 
+_repo_name_env = os.getenv("REPOMIND_REPO", "").strip()
+_repo_path_env = os.getenv("REPOMIND_REPO_PATH", "").strip()
+
+if _repo_name_env:
+    _initial_path = Path(_repo_path_env if _repo_path_env else str(_default_repositories_dir / _repo_name_env.replace('/', '_'))).resolve()
+else:
+    _initial_path = Path(_repo_path_env).resolve() if _repo_path_env else _default_repo_path
+
 _ACTIVE_REPO = {
-    "full_name": os.getenv("REPOMIND_REPO", "psf/requests"),
-    "path": Path(os.getenv("REPOMIND_REPO_PATH", str(_default_repo_path))).resolve(),
+    "full_name": _repo_name_env,
+    "path": _initial_path,
 }
 
 
 def get_repo_full_name() -> str:
-    return _ACTIVE_REPO["full_name"]
+    return _ACTIVE_REPO.get("full_name", "")
 
 
 def get_repo_root() -> Path:
-    return _ACTIVE_REPO["path"]
+    return _ACTIVE_REPO.get("path") or _default_repo_path
 
 
 def set_active_repo(full_name: str, path: Path) -> None:
@@ -73,11 +82,11 @@ def set_active_repo(full_name: str, path: Path) -> None:
         this_mod.REPO_FULL_NAME = full_name
         this_mod.REPO_ROOT = path.resolve()
         this_mod.REPO_PATH = path.resolve()
-        this_mod.REPO_URL = f"https://github.com/{full_name}.git"
+        this_mod.REPO_URL = f"https://github.com/{full_name}.git" if full_name else ""
 
 
 REPO_FULL_NAME = get_repo_full_name()
-REPO_URL = f"https://github.com/{REPO_FULL_NAME}.git"
+REPO_URL = f"https://github.com/{REPO_FULL_NAME}.git" if REPO_FULL_NAME else ""
 REPO_PATH = get_repo_root()
 REPO_ROOT = REPO_PATH
 DB_PATH = str(Path(os.getenv("REPOMIND_DB_PATH", str(_default_db_path))).resolve())

@@ -36,7 +36,7 @@ class RepoIndexRequest(BaseModel):
     repo_url: str = Field(
         ...,
         min_length=3,
-        description="GitHub repository URL or 'owner/repo' slug (e.g. 'https://github.com/psf/requests').",
+        description="GitHub repository URL or 'owner/repo' slug (e.g. 'https://github.com/owner/repository').",
     )
 
 

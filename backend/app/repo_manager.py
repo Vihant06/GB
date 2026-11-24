@@ -205,8 +205,18 @@ def get_active_repo_info() -> Dict[str, Any]:
     """Retrieve metadata about the currently active repository."""
     full_name = get_repo_full_name()
     root_path = get_repo_root()
-    canonical_url = f"https://github.com/{full_name}"
+    if not full_name or root_path is None or not root_path.exists():
+        return {
+            "repo_name": "",
+            "repo_url": "",
+            "repo_path": "",
+            "repo_available": False,
+            "python_files_count": 0,
+            "docs_files_count": 0,
+            "total_files_count": 0,
+        }
 
+    canonical_url = f"https://github.com/{full_name}"
     exists = root_path.exists()
     py_files_count = 0
     code_files_count = 0

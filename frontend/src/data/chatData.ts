@@ -28,30 +28,30 @@ export const SAMPLE_ATTACHMENTS: Array<{
 export const HOME_PROMPT_SUGGESTIONS: PromptSuggestion[] = [
   {
     id: 'architecture',
-    title: 'Explain Session architecture',
+    title: 'Explain system architecture',
     prompt:
-      'Explain Session class architecture and how HTTPAdapter handles connection pooling in requests.',
+      'Explain the high-level architecture, module boundaries, and entry point flows of this codebase.',
     icon: 'notes',
   },
   {
     id: 'impact',
     title: 'Analyze change blast radius',
     prompt:
-      'What is the blast radius and downstream callers if we modify Session.send method signature?',
+      'What is the blast radius and downstream callers if we modify the core data model or public API interfaces?',
     icon: 'idea',
   },
   {
     id: 'tests',
     title: 'Audit test coverage',
     prompt:
-      'Find test cases covering connection retries and identify untested methods in sessions.py.',
+      'Analyze test suite coverage across key modules and identify critical untested functions and methods.',
     icon: 'checklist',
   },
   {
     id: 'debugging',
-    title: 'Diagnose timeout issue',
+    title: 'Diagnose recent issues',
     prompt:
-      'Search recent GitHub Issues and CI failures regarding SSLError and connection timeouts.',
+      'Search recent GitHub Issues, pull requests, and CI workflow errors for unresolved failure patterns.',
     icon: 'spark',
   },
 ];

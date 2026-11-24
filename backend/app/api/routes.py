@@ -78,8 +78,8 @@ async def health_check():
 
     repo_root = get_repo_root()
     repo_name = get_repo_full_name()
-    repo_available = repo_root.exists()
-    status_str = "ok" if (db_ready and repo_available) else ("degraded" if db_ready else "error")
+    repo_available = bool(repo_name and repo_root and repo_root.exists())
+    status_str = "ok" if db_ready else "error"
 
     return HealthResponse(
         status=status_str,
@@ -195,9 +195,10 @@ async def stream_query(
 
             # 1. Initial Status Event
             current_repo_name = get_repo_full_name()
+            status_msg = f"Analyzing query for repository {current_repo_name}..." if current_repo_name else "Analyzing query..."
             yield _format_sse(
                 "status",
-                {"stage": "init", "message": f"Analyzing query for repository {current_repo_name}...", "text": ""},
+                {"stage": "init", "message": status_msg, "text": ""},
             )
 
             final_report = ""

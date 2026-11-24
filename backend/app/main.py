@@ -39,29 +39,31 @@ logger = logging.getLogger("repomind")
 async def lifespan(app: FastAPI):
     """Application lifespan: database setup, repository verification, and warmup."""
     logger.info("Initializing RepoMind backend...")
-    logger.info("Repository: %s (path: %s)", REPO_FULL_NAME, REPO_ROOT)
+    if REPO_FULL_NAME:
+        logger.info("Configured repository: %s (path: %s)", REPO_FULL_NAME, REPO_ROOT)
     logger.info("Database: %s", DB_PATH)
 
     # 1. Initialize SQLite schema and FTS5 tables
     init_db()
     logger.info("Database schema initialized and ready.")
 
-    # 2. Verify repository path
-    if not REPO_ROOT.exists():
-        logger.warning(
-            "Repository path '%s' does not exist. Creating directory for local repo clone...",
-            REPO_ROOT,
-        )
-        REPO_ROOT.mkdir(parents=True, exist_ok=True)
+    # 2. Verify repository path if active repo is specified
+    if REPO_FULL_NAME:
+        logger.info("Active repository: %s (path: %s)", REPO_FULL_NAME, REPO_ROOT)
+        if not REPO_ROOT.exists():
+            logger.info("Creating directory for repository at '%s'...", REPO_ROOT)
+            REPO_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # 3. Controlled GitHub metadata sync if token is available
-    if GITHUB_TOKEN and os.getenv("REPOMIND_SYNC_ON_STARTUP", "true").lower() in ("true", "1"):
-        try:
-            logger.info("Syncing initial GitHub metadata for '%s'...", REPO_FULL_NAME)
-            sync_github_issues(repo_full_name=REPO_FULL_NAME, max_issues=10)
-            sync_github_ci_failures(repo_full_name=REPO_FULL_NAME, max_runs=3)
-        except Exception as e:
-            logger.warning("Optional GitHub sync on startup failed: %s", e)
+        # 3. Controlled GitHub metadata sync if token is available
+        if GITHUB_TOKEN and os.getenv("REPOMIND_SYNC_ON_STARTUP", "false").lower() in ("true", "1"):
+            try:
+                logger.info("Syncing initial GitHub metadata for '%s'...", REPO_FULL_NAME)
+                sync_github_issues(repo_full_name=REPO_FULL_NAME, max_issues=10)
+                sync_github_ci_failures(repo_full_name=REPO_FULL_NAME, max_runs=3)
+            except Exception as e:
+                logger.warning("Optional GitHub sync on startup failed: %s", e)
+    else:
+        logger.info("No fixed repository configured on startup. System ready for dynamic repository linking.")
 
     logger.info("RepoMind is ready to process queries.")
     yield
