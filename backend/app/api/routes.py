@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import AsyncGenerator
 
 import anyio
@@ -35,6 +36,61 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Patterns that must never reach the frontend
+_PRIVATE_PATTERNS = [
+    re.compile(r"\b(ip|key):[a-f0-9]{8,}\b", re.IGNORECASE),  # hashed IPs / key fingerprints
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),                # raw IPv4 addresses
+    re.compile(r"'[a-f0-9]{12,}'"),                            # any hex actor-id in quotes
+    re.compile(r"for '[^']{8,}'"),                             # "for '<something>'" identity leaks
+]
+
+# Map internal bracket-tags to human-readable labels
+_TAG_MAP = {
+    "[Input Guardrail | LLM Router]": "Routing query",
+    "[Input Guardrail]": "Query validated",
+    "[Rate Limiter]": "Rate limit OK",
+    "[Orchestrator Plan |": "Planning investigation",
+    "[Orchestrator Plan]": "Planning investigation",
+    "[Orchestrator Review |": "Reviewing evidence",
+    "[Orchestrator Review]": "Reviewing evidence",
+    "[Citation Verifier]": "Verifying citations",
+    "[Orchestrator Synthesize]": "Synthesizing answer",
+    "[Output Guardrail]": "Finalizing response",
+    "[No Evidence Exit]": "No evidence found",
+    "[General Coding Fast Path]": "Answering question",
+    "[repository_intelligence": "Repository Intelligence agent",
+    "[debugging": "Debugging agent",
+    "[change_impact": "Change Impact agent",
+    "[test_intelligence": "Test Intelligence agent",
+    "[repository_intelligence | AST Fast Path]": "Repository Intelligence agent (fast path)",
+}
+
+
+def _sanitize_log(log: str) -> str:
+    """Convert internal trace log lines into safe, user-friendly UI messages."""
+    # Strip private identity / IP data first
+    sanitized = log
+    for pat in _PRIVATE_PATTERNS:
+        sanitized = pat.sub("", sanitized)
+
+    # Remap internal bracket-tags to readable labels
+    for tag, label in _TAG_MAP.items():
+        if tag in sanitized:
+            # Keep the informative part after the tag if any
+            after = sanitized.split("]", 1)[-1].strip(" .:") if "]" in sanitized else ""
+            # Remove internal attempt numbers, pipe separators, etc.
+            after = re.sub(r"\s*\|\s*Attempt\s*\d+/\d*", "", after)
+            after = re.sub(r"\s*\|\s*Attempt\s*\d+", "", after)
+            sanitized = f"{label}: {after}".strip(": ") if after else label
+            break
+
+    # Drop any residual bracket-prefixed internal tags
+    sanitized = re.sub(r"^\[[\w\s|]+\]\s*", "", sanitized)
+
+    # Collapse extra whitespace and punctuation
+    sanitized = re.sub(r"\s{2,}", " ", sanitized).strip(" .:,")
+    return sanitized or log  # fall back to original only if result is empty
 
 
 @router.get("/repo/active")
@@ -156,7 +212,7 @@ async def execute_query(
         return QueryResponse(
             query=request.query,
             report=report,
-            trace_logs=result.get("trace_logs", []),
+            trace_logs=[_sanitize_log(l) for l in result.get("trace_logs", [])],
             usage=usage,
             status=status_val,
         )
@@ -219,7 +275,7 @@ async def stream_query(
                             for log in logs:
                                 yield _format_sse(
                                     "progress",
-                                    {"node": node_name, "message": log, "stage": node_name},
+                                    {"node": node_name, "message": _sanitize_log(log), "stage": node_name},
                                 )
 
                         if node_output.get("final_report"):
@@ -288,7 +344,7 @@ async def stream_query(
                     {
                         "report": final_report,
                         "text": "",
-                        "trace_logs": collected_logs,
+                        "trace_logs": [_sanitize_log(l) for l in collected_logs],
                         "usage": usage_dict,
                         "done": True,
                     },

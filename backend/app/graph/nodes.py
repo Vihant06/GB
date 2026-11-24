@@ -196,7 +196,7 @@ def rate_limit_gate_node(state: RepoMindState):
             "trace_logs": [f"[Rate Limiter] {msg}"],
         }
     return {
-        "trace_logs": [f"[Rate Limiter] Query within per-minute and daily limits for '{actor_id}'."]
+        "trace_logs": ["[Rate Limiter] Query is within rate limits."]
     }
 
 
