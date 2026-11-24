@@ -293,7 +293,7 @@ def general_coding_node(state: RepoMindState):
 
 
 def _ast_extract_symbol_evidence(sub_query: str, user_query: str) -> list[dict]:
-    """Extract exact AST line ranges for explicitly named .py files and Class.method/function symbols."""
+    """Extract exact AST line ranges for named .py files or Class.method symbols (with FTS5 fallback)."""
     combined = f"{user_query} {sub_query}"
     file_matches = re.findall(r"([A-Za-z0-9_./-]+\.py)\b", combined)
     sym_matches = re.findall(r"\b([A-Z][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", combined)
@@ -305,6 +305,20 @@ def _ast_extract_symbol_evidence(sub_query: str, user_query: str) -> list[dict]:
         p, err = safe_repo_path(f)
         if not err and p is not None and p.exists() and p.is_file():
             target_files.append((f, p))
+
+    # FTS5 fallback: resolve candidate .py files when Class.method is named without an explicit .py path
+    if not target_files and sym_matches:
+        curr_repo = get_repo_full_name()
+        if curr_repo:
+            try:
+                fts_hits = query_repo_symbols_fts(curr_repo, " ".join(sym_matches), limit=4)
+                for fp, _ in fts_hits:
+                    if fp.endswith(".py"):
+                        p, err = safe_repo_path(fp)
+                        if not err and p is not None and p.exists() and p.is_file():
+                            target_files.append((fp, p))
+            except Exception:
+                pass
 
     if not target_files:
         return []
@@ -514,11 +528,11 @@ def orchestrator_review_node(state: RepoMindState):
     budget = get_current_budget()
     q_lower = state["user_query"].lower()
     missing_tools = []
-    if "exa" in q_lower and os.getenv("EXA_API_KEY") and not budget.was_used("exa"):
+    if re.search(r"\bexa\b", q_lower) and os.getenv("EXA_API_KEY") and not budget.was_used("exa"):
         missing_tools.append("Exa search was explicitly requested but exa_search_technical was never called.")
-    if "firecrawl" in q_lower and os.getenv("FIRECRAWL_API_KEY") and not budget.was_used("firecrawl"):
+    if re.search(r"\bfirecrawl\b", q_lower) and os.getenv("FIRECRAWL_API_KEY") and not budget.was_used("firecrawl"):
         missing_tools.append("Firecrawl ingestion was explicitly requested but firecrawl_ingest_docs was never called.")
-    if "context7" in q_lower and os.getenv("CONTEXT7_API_KEY") and not budget.was_used("context7"):
+    if re.search(r"\bcontext7\b", q_lower) and os.getenv("CONTEXT7_API_KEY") and not budget.was_used("context7"):
         missing_tools.append("Context7 docs were explicitly requested but context7_search_docs was never called.")
 
     if missing_tools and state.get("attempt_count", 1) < 2:
@@ -644,13 +658,20 @@ def verify_citations_node(state: RepoMindState):
             dropped += 1
             continue
 
-        total_lines = len(target.read_text(encoding="utf-8", errors="ignore").splitlines())
+        file_lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        total_lines = len(file_lines)
         start = max(1, int(item.get("start_line", 1)))
         end = min(total_lines, int(item.get("end_line", start)))
         if 1 <= start <= end <= total_lines:
             item_copy = dict(item)
             item_copy["start_line"] = start
             item_copy["end_line"] = end
+            q_low = (state.get("user_query") or "").lower()
+            wants_code = any(k in q_low for k in ("show", "exact", "code", "function", "method", "implementation"))
+            if wants_code and (end - start) <= 45 and "```" not in claim:
+                snippet = "\n".join(file_lines[start - 1 : end])
+                lang = "python" if fp.endswith(".py") else ""
+                item_copy["claim"] = f"{claim}\n```{lang}\n{snippet[:1600]}\n```"
             verified.append(item_copy)
         else:
             dropped += 1
