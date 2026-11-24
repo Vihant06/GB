@@ -96,8 +96,10 @@ def read_project_dependencies() -> str:
     pkg_json = root / "package.json"
     if pkg_json.exists():
         try:
-            data = json.loads(pkg_json.read_text(encoding="utf-8", errors="ignore"))
-            lines = [f"[package.json: {data.get('name', 'project')} v{data.get('version', '')}]"]
+            raw_pkg = pkg_json.read_text(encoding="utf-8", errors="ignore")
+            pkg_lines = len(raw_pkg.splitlines()) or 1
+            data = json.loads(raw_pkg)
+            lines = [f"[package.json:L1-L{pkg_lines} | {data.get('name', 'project')} v{data.get('version', '')}]"]
             if data.get("description"):
                 lines.append(f"Description: {data.get('description')}")
             if data.get("main"):
@@ -118,15 +120,17 @@ def read_project_dependencies() -> str:
     pyproject = root / "pyproject.toml"
     if pyproject.exists():
         try:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="ignore"))
+            raw_pyp = pyproject.read_text(encoding="utf-8", errors="ignore")
+            pyp_lines = len(raw_pyp.splitlines()) or 1
+            data = tomllib.loads(raw_pyp)
             proj = data.get("project", {})
             deps = proj.get("dependencies", [])
             opt_deps = proj.get("optional-dependencies", {})
             if deps:
-                findings.append("[pyproject.toml dependencies]\n" + "\n".join(f"- {d}" for d in deps))
+                findings.append(f"[pyproject.toml:L1-L{pyp_lines} dependencies]\n" + "\n".join(f"- {d}" for d in deps))
             for group, items in opt_deps.items():
                 findings.append(
-                    f"[pyproject.toml optional:{group}]\n" + "\n".join(f"- {d}" for d in items[:20])
+                    f"[pyproject.toml:L1-L{pyp_lines} optional:{group}]\n" + "\n".join(f"- {d}" for d in items[:20])
                 )
         except Exception as e:
             findings.append(f"[pyproject.toml parse warning] {e}")
@@ -136,6 +140,7 @@ def read_project_dependencies() -> str:
         fpath = root / fname
         if fpath.exists():
             text = fpath.read_text(encoding="utf-8", errors="ignore")
+            total_f_lines = len(text.splitlines()) or 1
             matches = re.findall(
                 r"""['"]([a-zA-Z0-9_.-]+(?:\[[^\]]+\])?\s*(?:==|>=|<=|~=|!=|>|<)[^'"]+)['"]""",
                 text,
@@ -148,7 +153,7 @@ def read_project_dependencies() -> str:
                 ]
             if matches:
                 findings.append(
-                    f"[{fname}]\n" + "\n".join(f"- {m}" for m in dict.fromkeys(matches[:30]))
+                    f"[{fname}:L1-L{total_f_lines}]\n" + "\n".join(f"- {m}" for m in dict.fromkeys(matches[:30]))
                 )
 
     return "\n\n".join(findings) or "No dependency manifest files found in repository root."

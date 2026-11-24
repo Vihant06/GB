@@ -146,7 +146,7 @@ function AiStatus({
             data-state={state}
             data-active={active || undefined}
             role="status"
-            className={cn('flex h-8 w-fit items-center gap-2 rounded-full border-[1.5px] border-[#111111] dark:border-[#42413A] bg-[#FAFAF5] dark:bg-[#282823] px-3 py-1 font-mono text-xs text-[#111111] dark:text-[#ECEBE4] shadow-[0_2px_0_0_#111111] dark:shadow-[0_2px_0_0_#0E0E0C]', className)}
+            className={cn('flex h-8 w-fit max-w-full overflow-hidden items-center gap-2 rounded-full border-[1.5px] border-[#111111] dark:border-[#42413A] bg-[#FAFAF5] dark:bg-[#282823] px-3 py-1 font-mono text-xs text-[#111111] dark:text-[#ECEBE4] shadow-[0_2px_0_0_#111111] dark:shadow-[0_2px_0_0_#0E0E0C]', className)}
             {...props}
         >
             <span data-slot="ai-status-icon" className="relative flex size-5 shrink-0 items-center justify-center">
@@ -168,13 +168,13 @@ function AiStatus({
 
             {/* the row springs between widths, so the detail and timer glide instead of jumping */}
             <motion.div
-                className="relative overflow-x-clip"
+                className="relative min-w-0 max-w-full overflow-x-clip"
                 initial={false}
                 animate={{ width: bounds.width || 'auto' }}
                 transition={swap}
             >
-                <div ref={measureRef} className="flex w-max items-center gap-1.5 whitespace-nowrap">
-                    <span className="relative grid">
+                <div ref={measureRef} className="flex w-max max-w-full items-center gap-1.5 whitespace-nowrap">
+                    <span className="relative grid min-w-0">
                         <AnimatePresence initial={false} mode="popLayout">
                             <motion.span
                                 key={text}
@@ -184,7 +184,7 @@ function AiStatus({
                                 exit="exit"
                                 transition={swap}
                                 data-slot="ai-status-label"
-                                className={cn('font-semibold', !shimmering && 'text-[#868593]')}
+                                className={cn('font-semibold max-w-[220px] sm:max-w-[380px] md:max-w-[480px] truncate block', !shimmering && 'text-[#868593]')}
                             >
                                 {shimmering ? <Shimmer reduced={reduced}>{text}</Shimmer> : text}
                             </motion.span>
@@ -278,9 +278,10 @@ function AiStatusIcon({ state }: AiStatusIconProps) {
                             {...STROKE}
                             x1={x}
                             x2={x}
-                            y1={10}
+                            y1={15}
                             y2={19}
                             strokeWidth={3}
+                            initial={{ y1: 15 }}
                             animate={reduced ? undefined : { y1: [15, 5, 15] }}
                             transition={loop({ duration: 0.9, delay: i * 0.15, ...LOOP })}
                         />

@@ -22,6 +22,7 @@ export interface ChatMessage {
   isError?: boolean;
   progressStep?: string;
   traceLogs?: string[];
+  repoTarget?: RepoTarget;
 }
 
 export interface RepoTarget {

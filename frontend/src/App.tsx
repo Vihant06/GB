@@ -271,6 +271,7 @@ export default function App() {
                 text: '',
                 isStreaming: true,
                 progressStep: stepMsg,
+                repoTarget: activeRepo ?? undefined,
               };
               setSession((prev) => ({
                 ...prev,
@@ -298,6 +299,7 @@ export default function App() {
                 timestamp: replyTimestamp,
                 text: chunkText,
                 isStreaming: true,
+                repoTarget: activeRepo ?? undefined,
               };
               setSession((prev) => ({
                 ...prev,
@@ -499,7 +501,7 @@ export default function App() {
         {railNotice && (
           <div
             role="status"
-            className="absolute top-14 left-0 z-30 rounded-full border-[1.75px] border-[#111111] dark:border-[#42413A] bg-[#F7EA78] dark:bg-[#D8CB68] px-4 py-1.5 font-mono text-xs text-[#111111] dark:text-[#181815] shadow-[0_3px_0_0_#111111] dark:shadow-[0_3px_0_0_#0E0E0C]"
+            className="absolute bottom-24 right-4 z-30 rounded-full border-[1.75px] border-[#111111] dark:border-[#42413A] bg-[#F7EA78] dark:bg-[#D8CB68] px-4 py-1.5 font-mono text-xs text-[#111111] dark:text-[#181815] shadow-[0_3px_0_0_#111111] dark:shadow-[0_3px_0_0_#0E0E0C]"
           >
             {railNotice}
           </div>

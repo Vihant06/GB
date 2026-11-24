@@ -43,7 +43,15 @@ function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): W
       const rawPath = match[1];
       const startLine = match[2];
       const endLine = match[3];
-      if (rawPath && !rawPath.startsWith('http') && !rawPath.includes(' ') && !seenIds.has(rawPath)) {
+      const hasLineRef = Boolean(startLine);
+      const looksLikeFilePath = /[/.]/.test(rawPath) && !/^[A-Z0-9_]+$/.test(rawPath);
+      if (
+        rawPath &&
+        (hasLineRef || looksLikeFilePath) &&
+        !rawPath.startsWith('http') &&
+        !rawPath.includes(' ') &&
+        !seenIds.has(rawPath)
+      ) {
         seenIds.add(rawPath);
         const lineFragment = startLine ? (endLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`) : '';
         const lineLabel = startLine ? (endLine ? `:L${startLine}-L${endLine}` : `:L${startLine}`) : '';
@@ -335,6 +343,8 @@ export function ChatSessionPane({
         ) : (
           session.messages.map((message) => {
             const isUser = message.sender === 'user';
+            const messageRepo = message.repoTarget ?? effectiveRepo;
+            const messageSources = !isUser ? getSourcesForMessage(message, messageRepo) : [];
 
             return (
               <div
@@ -405,17 +415,17 @@ export function ChatSessionPane({
                       )}
 
                       {/* 2. WebSearch: ONLY rendered when external web/docs search or verified citations were actually invoked */}
-                      {!isUser && getSourcesForMessage(message, effectiveRepo).length > 0 && !message.isStreaming && (
+                      {!isUser && messageSources.length > 0 && !message.isStreaming && (
                         <div className="mb-3">
                           <WebSearch
                             query={
-                              getSourcesForMessage(message, effectiveRepo).some((s) => s.id.startsWith('ext-'))
+                              messageSources.some((s) => s.id.startsWith('ext-'))
                                 ? 'External Documentation & Web Search'
-                                : effectiveRepo
-                                ? `${effectiveRepo.name} Verified Sources`
+                                : messageRepo
+                                ? `${messageRepo.name} Verified Sources`
                                 : 'Verified Codebase Citations'
                             }
-                            sources={getSourcesForMessage(message, effectiveRepo)}
+                            sources={messageSources}
                             status="done"
                             className="w-full font-mono text-xs"
                           />
