@@ -22,6 +22,7 @@ from app.api.deps import get_actor_identity
 from app.budget import get_current_budget, request_budget_scope
 from app.config import DB_PATH, get_repo_full_name, get_repo_root
 from app.database import connect_sqlite, init_db
+from app.graph.nodes import reset_token_callback, set_token_callback
 from app.graph.workflow import repomind_graph
 from app.repo_manager import clone_and_index_repo, get_active_repo_info
 from app.schemas import (
@@ -195,10 +196,11 @@ async def execute_query(
             )
 
         report = result.get("final_report", "")
+        raw_logs_str = " ".join(result.get("trace_logs", []))
         status_val = "completed"
-        if "[RATE LIMITED]" in report:
+        if "[Rate Limiter]" in raw_logs_str and "limit" in report.lower():
             status_val = "rate_limited"
-        elif "[GUARDRAIL BLOCKED]" in report:
+        elif "[Input Guardrail] Blocked" in raw_logs_str or "I cannot answer that question" in report:
             status_val = "blocked"
 
         usage = UsageMetrics(
@@ -259,15 +261,43 @@ async def stream_query(
 
             final_report = ""
             collected_logs = []
+            streamed_live_tokens = False
+            sse_queue: asyncio.Queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _on_live_token(tok: str) -> None:
+                loop.call_soon_threadsafe(sse_queue.put_nowait, ("token", tok))
+
+            cb_token = set_token_callback(_on_live_token)
+
+            async def _produce_graph_events() -> None:
+                try:
+                    async for event in repomind_graph.astream(initial_state, stream_mode="updates"):
+                        await sse_queue.put(("event", event))
+                    await sse_queue.put(("done", None))
+                except Exception as exc:
+                    await sse_queue.put(("error", exc))
+
+            producer_task = asyncio.create_task(_produce_graph_events())
 
             try:
-                # Stream node updates from LangGraph
-                async for event in repomind_graph.astream(initial_state, stream_mode="updates"):
-                    # Check for client disconnect
+                while True:
                     if await req.is_disconnected():
+                        producer_task.cancel()
                         logger.info("Client disconnected from /query/stream for actor '%s'", actor_id)
                         return
 
+                    kind, payload_item = await sse_queue.get()
+                    if kind == "done":
+                        break
+                    if kind == "error":
+                        raise payload_item
+                    if kind == "token":
+                        streamed_live_tokens = True
+                        yield _format_sse("token", {"token": payload_item, "text": payload_item})
+                        continue
+
+                    event = payload_item
                     for node_name, node_output in event.items():
                         logs = node_output.get("trace_logs", [])
                         if logs:
@@ -318,9 +348,8 @@ async def stream_query(
                                 },
                             )
 
-                # 2. Stream Report Tokens
-                if final_report:
-                    # Stream tokens in small chunks for responsive UX
+                # 2. Fallback token stream if no live synthesis tokens were emitted (e.g. guardrail or mock)
+                if final_report and not streamed_live_tokens:
                     words = final_report.split(" ")
                     for i, word in enumerate(words):
                         if await req.is_disconnected():
@@ -356,6 +385,10 @@ async def stream_query(
                     "error",
                     {"error": f"Investigation failed: {str(e)}"},
                 )
+            finally:
+                reset_token_callback(cb_token)
+                if not producer_task.done():
+                    producer_task.cancel()
 
     return StreamingResponse(
         event_generator(),

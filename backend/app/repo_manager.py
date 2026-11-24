@@ -8,6 +8,7 @@ Handles Git LFS repositories by safely skipping gigabyte model weights.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.config import (
     get_repo_root,
     set_active_repo,
 )
+from app.database import index_repo_symbols
 from app.tools.github_sync import sync_github_issues
 
 # Ensure Git LFS smudge is skipped globally to prevent downloading large model binaries
@@ -178,6 +180,42 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
         m for m in ("pyproject.toml", "requirements.txt", "package.json", "setup.py", "setup.cfg")
         if (target_dir / m).exists()
     ]
+
+    # Build fast SQLite FTS5 index of file paths and AST symbols (capped for speed)
+    fts_entries: list[tuple[str, str]] = []
+    for rel_str in (py_files[:300] + [f for f in code_files if not f.endswith(".py")][:150] + doc_files[:50] + manifests):
+        fpath = target_dir / rel_str
+        if not fpath.is_file():
+            continue
+        if rel_str.endswith(".py"):
+            try:
+                src = fpath.read_text(encoding="utf-8", errors="ignore")
+                tree = ast.parse(src)
+                syms = []
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        syms.append(f"def {node.name} (L{node.lineno})")
+                    elif isinstance(node, ast.ClassDef):
+                        methods = [
+                            m.name for m in node.body
+                            if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        ][:20]
+                        syms.append(f"class {node.name} (L{node.lineno}): {' '.join(methods)}")
+                sym_text = f"{rel_str} | " + "; ".join(syms) if syms else rel_str
+                fts_entries.append((rel_str, sym_text[:1500]))
+            except Exception:
+                fts_entries.append((rel_str, rel_str))
+        else:
+            try:
+                preview = " ".join(fpath.read_text(encoding="utf-8", errors="ignore").splitlines()[:15])
+                fts_entries.append((rel_str, f"{rel_str} | {preview[:400]}"))
+            except Exception:
+                fts_entries.append((rel_str, rel_str))
+
+    try:
+        index_repo_symbols(full_name, fts_entries)
+    except Exception as e:
+        logger.debug("FTS5 repo symbol indexing skipped: %s", e)
 
     # Optional initial issue sync if token configured
     if GITHUB_TOKEN:

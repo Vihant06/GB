@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import contextvars
 import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Literal
+from typing import Callable, Literal, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Send
@@ -38,6 +39,7 @@ from app.config import (
 from app.database import (
     check_and_record_query_rate_limit,
     connect_sqlite,
+    query_repo_symbols_fts,
 )
 from app.graph.state import (
     EvidenceEvaluation,
@@ -54,6 +56,21 @@ from app.tools.web_docs import (
     exa_search_technical,
     firecrawl_ingest_docs,
 )
+
+
+_TOKEN_CALLBACK: contextvars.ContextVar[Optional[Callable[[str], None]]] = contextvars.ContextVar(
+    "repomind_token_callback", default=None
+)
+
+
+def set_token_callback(cb: Optional[Callable[[str], None]]):
+    """Set a per-context callback to receive live synthesis tokens."""
+    return _TOKEN_CALLBACK.set(cb)
+
+
+def reset_token_callback(token) -> None:
+    """Reset the live synthesis token callback."""
+    _TOKEN_CALLBACK.reset(token)
 
 
 def _is_deep_query(query: str) -> bool:
@@ -141,13 +158,13 @@ def input_guardrail_node(state: RepoMindState):
     if not raw_query:
         return {
             "user_query": "",
-            "final_report": "I can answer a coding-related question only.",
+            "final_report": "I can only answer coding and repository-related questions. Please enter a question to get started.",
             "trace_logs": ["[Input Guardrail] Blocked empty query."],
         }
 
     if len(raw_query) > MAX_QUERY_CHARS:
         return {
-            "final_report": f"[GUARDRAIL BLOCKED] Query exceeds maximum length of {MAX_QUERY_CHARS} characters.",
+            "final_report": f"Your message is too long for me to process at once (limit: {MAX_QUERY_CHARS} characters). Please shorten your question and try again.",
             "trace_logs": [f"[Input Guardrail] Blocked oversized query ({len(raw_query)} chars)."],
         }
 
@@ -155,7 +172,7 @@ def input_guardrail_node(state: RepoMindState):
     for pat in _INJECTION_PATTERNS:
         if re.search(pat, lower_q):
             return {
-                "final_report": "[GUARDRAIL BLOCKED] Query matched a prompt-injection or credential-exfiltration pattern.",
+                "final_report": "I cannot answer that question. I can only help with safe questions about the repository and software engineering.",
                 "trace_logs": ["[Input Guardrail] Blocked prompt-injection attempt."],
             }
 
@@ -169,7 +186,7 @@ def input_guardrail_node(state: RepoMindState):
     if route == "off_topic":
         return {
             "user_query": sanitized_query,
-            "final_report": "I can answer a coding-related question only.",
+            "final_report": "I can only help with software engineering and questions about the linked repository.",
             "trace_logs": logs,
         }
 
@@ -192,7 +209,7 @@ def rate_limit_gate_node(state: RepoMindState):
     allowed, msg = check_and_record_query_rate_limit(actor_id)
     if not allowed:
         return {
-            "final_report": f"[RATE LIMITED] {msg}",
+            "final_report": "You have reached the query limit for now. Please wait a moment and try again.",
             "trace_logs": [f"[Rate Limiter] {msg}"],
         }
     return {
@@ -413,6 +430,14 @@ def orchestrator_plan_node(state: RepoMindState):
     curr_repo = get_repo_full_name()
 
     context_msg = f"Developer Query: {state['user_query']}\nActive Repository: {curr_repo}\nAttempt: {attempt}/2"
+    if attempt == 1 and curr_repo:
+        try:
+            fts_hits = query_repo_symbols_fts(curr_repo, state["user_query"], limit=6)
+            if fts_hits:
+                hit_lines = [f"- {fp}: {sym[:180]}" for fp, sym in fts_hits]
+                context_msg += "\n\nTop Indexed Candidate Files & Symbols (FTS5):\n" + "\n".join(hit_lines)
+        except Exception:
+            pass
     if prior_evidence:
         summary_lines = [
             f"- [{e['specialist']}] {e['file_path']}:L{e['start_line']}-L{e['end_line']} -> {e['claim']}"
@@ -710,11 +735,27 @@ Verified Evidence:
 {chr(10).join(evidence_lines)}"""
 
     if synth_model and hasattr(synth_model, "stream"):
-        chunks = [
-            chunk.content
-            for chunk in synth_model.stream([sys_msg, HumanMessage(content=synth_prompt)])
-            if chunk.content
-        ]
+        token_cb = _TOKEN_CALLBACK.get()
+        chunks = []
+        in_think = False
+        for chunk in synth_model.stream([sys_msg, HumanMessage(content=synth_prompt)]):
+            tok = getattr(chunk, "content", "") or ""
+            if not tok:
+                continue
+            chunks.append(tok)
+            if token_cb:
+                # Filter out <think>...</think> blocks from live token stream
+                if "<think>" in tok:
+                    in_think = True
+                    continue
+                if "</think>" in tok:
+                    in_think = False
+                    after = tok.split("</think>", 1)[-1]
+                    if after:
+                        token_cb(after)
+                    continue
+                if not in_think:
+                    token_cb(tok)
         report = re.sub(r"<think>.*?</think>", "", "".join(chunks), flags=re.DOTALL).strip()
     else:
         report = f"# Synthesized Report for {state['user_query']}\n\nEvidence verified:\n" + "\n".join(evidence_lines)
@@ -726,19 +767,20 @@ Verified Evidence:
 
 
 def output_guardrail_node(state: RepoMindState):
-    """Post-synthesis guardrail: redact leaked secrets and strip :L1-L1 placeholder citations."""
+    """Post-synthesis guardrail: redact leaked secrets, strip :L1-L1 / :0-0 placeholders, and verify cited paths."""
     report = state.get("final_report") or ""
     if not report:
         return {"trace_logs": ["[Output Guardrail] Empty report; skipped."]}
 
     cleaned, secret_hits = redact_secrets(report)
     cleaned, placeholder_hits = re.subn(r"\s*\[[^\]]+:L1-L1\]", "", cleaned)
+    cleaned, zero_hits = re.subn(r":0-0\b", "", cleaned)
 
     logs = []
     if secret_hits:
         logs.append(f"[Output Guardrail] Redacted {secret_hits} secret(s) from final report.")
-    if placeholder_hits:
-        logs.append(f"[Output Guardrail] Stripped {placeholder_hits} :L1-L1 placeholder citation(s).")
+    if placeholder_hits or zero_hits:
+        logs.append(f"[Output Guardrail] Stripped {placeholder_hits + zero_hits} placeholder citation(s).")
     if not logs:
         logs.append("[Output Guardrail] Passed secret and citation-hygiene checks.")
 

@@ -95,6 +95,15 @@ def init_db(db_path: str | None = None, force: bool = False) -> None:
                     )
                 """)
 
+                # FTS5 Full Text Search index for local repository files & AST symbols
+                conn.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS repo_symbols_fts USING fts5(
+                        repo_name,
+                        file_path,
+                        symbols_text
+                    )
+                """)
+
                 # Rate limiting and API cost ledger
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS rate_limit_events (
@@ -391,3 +400,52 @@ def upsert_external_records(records: list[dict], db_path: str | None = None) -> 
                 """,
                 records,
             )
+
+
+def index_repo_symbols(
+    repo_name: str,
+    entries: list[tuple[str, str]],
+    db_path: str | None = None,
+) -> int:
+    """Replace FTS5 symbol index for a repository with (file_path, symbols_text) entries."""
+    if not repo_name:
+        return 0
+    init_db(db_path)
+    with contextlib.closing(connect_sqlite(db_path)) as conn:
+        with conn:
+            conn.execute("DELETE FROM repo_symbols_fts WHERE repo_name = ?", (repo_name,))
+            if entries:
+                conn.executemany(
+                    "INSERT INTO repo_symbols_fts (repo_name, file_path, symbols_text) VALUES (?, ?, ?)",
+                    [(repo_name, fp, sym) for fp, sym in entries],
+                )
+    return len(entries)
+
+
+def query_repo_symbols_fts(
+    repo_name: str,
+    query: str,
+    limit: int = 6,
+    db_path: str | None = None,
+) -> list[tuple[str, str]]:
+    """Fast BM25/FTS5 lookup of candidate repository files and symbols for a query."""
+    if not repo_name or not query:
+        return []
+    init_db(db_path)
+    tokens = [
+        t for t in re.findall(r"[a-zA-Z0-9_]{2,}", query)
+        if t.upper() not in {"AND", "OR", "NOT", "NEAR"}
+    ]
+    if not tokens:
+        return []
+    fts_expr = " OR ".join(f'"{t}"' for t in tokens[:10])
+    with contextlib.closing(connect_sqlite(db_path)) as conn:
+        try:
+            return conn.execute(
+                "SELECT file_path, symbols_text FROM repo_symbols_fts "
+                "WHERE repo_symbols_fts MATCH ? AND repo_name = ? "
+                "ORDER BY bm25(repo_symbols_fts) LIMIT ?",
+                [fts_expr, repo_name, limit],
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []

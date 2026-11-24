@@ -229,14 +229,14 @@ def structured_invoke(model: Any, schema_cls: Type[T], messages: list) -> T:
         content=(
             "/no_think\n"
             "You are a strict JSON extractor. Output ONLY raw valid JSON. "
-            "Keep summaries concise and include AT MOST 5 items per list/array."
+            "Keep summaries concise and include AT MOST 12 items per list/array."
         )
     )
     prompt_msg = HumanMessage(
         content=(
             f"{combined_text}\n\n"
             "Respond ONLY with a single valid JSON object matching this exact structure "
-            "(AT MOST 5 items in any list, no markdown fences, no commentary):\n"
+            "(AT MOST 12 items in any list, no markdown fences, no commentary):\n"
             f"{template}"
         )
     )
