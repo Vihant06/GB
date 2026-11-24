@@ -393,7 +393,7 @@ def run_test_intel(state: dict):
 
 PLANNER_PROMPT = """You are the Orchestrator Planner for RepoMind.
 Route the developer's query to 1 to 4 parallel specialist tasks:
-- repository_intelligence: local code execution flow, repository layout, README/manifests, Context7 library docs, Firecrawl external doc ingestion, AND extracting actual data content from files.
+- repository_intelligence: local code execution flow, repository layout, searching code patterns, reading functions/methods, README/manifests/dependencies, Context7 library docs, Firecrawl external doc ingestion, AND extracting actual data content from files.
 - debugging: runtime errors, exceptions, GitHub Issues, GitHub Actions CI failures, Exa web search, and Context7 docs.
 - change_impact: blast radius of code edits, callers, importers, broken APIs/tests, and migration docs.
 - test_intelligence: existing test cases, assertions, test coverage, and untested methods.
@@ -401,7 +401,7 @@ Route the developer's query to 1 to 4 parallel specialist tasks:
 Critical planning rules:
 1. On Attempt 1, if a query combines independent sources (e.g. Firecrawl URL + Context7 docs + local code), dispatch them as SEPARATE parallel tasks.
 2. When the user asks what the repository does, its purpose, architecture, or an overview: dispatch 'repository_intelligence' with a sub_query instructed to list files, read the README, inspect project manifests (package.json, requirements.txt, pyproject.toml), and inspect main entrypoints (e.g. app.js, app.py, main.py).
-3. When the user asks about DATA contained in files (e.g. 'list questions', 'show entries', 'what are the top items'), dispatch 'repository_intelligence' with a sub_query that instructs reading the relevant data files and EXTRACTING the actual content values.
+3. When the user asks about DATA contained in files, dependencies (requirements.txt, pyproject.toml, package.json), 'list all X', or 'show function/code Y': dispatch 'repository_intelligence' with concrete search_code_pattern / read_project_dependencies / read_file_lines instructions—do NOT dispatch debugging or web search unless an error, issue, or external doc is explicitly requested.
 4. When dispatching a Firecrawl task, keep concrete technical keywords in the sub_query (e.g. 'Transport Adapters HTTPAdapter Retry mount') so FTS5 retrieves the exact section—never ask vaguely for 'full documentation'.
 5. On Attempt 2, ONLY dispatch tasks for the specific gaps listed in Missing Information Feedback; do NOT re-run sources already present in Already Collected Evidence."""
 
@@ -683,15 +683,15 @@ def orchestrator_synthesize_node(state: RepoMindState):
         content=(
             "/no_think\n"
             "You are the Lead Engineering Responder for RepoMind.\n"
-            "Your PRIMARY job is to DIRECTLY ANSWER the developer's question using the verified evidence.\n\n"
+            "Your PRIMARY job is to DIRECTLY and ACCURATELY ANSWER the developer's question using ONLY the verified evidence.\n\n"
             "CRITICAL INSTRUCTIONS:\n"
             "1. Read the Developer Query carefully. Answer EXACTLY what they asked.\n"
-            "2. If they ask for a list (e.g. 'top 5 questions', 'list all endpoints'), give them that list directly.\n"
-            "3. If they ask about data or content in files (e.g. questions, configs, entries), extract and present that DATA—do NOT describe the code structure that processes it.\n"
-            "4. If they ask about architecture or how code works, then explain the architecture.\n"
-            "5. NEVER produce a meta-description of the codebase when the user wants actual content/data from files.\n"
-            "6. Keep your answer focused and concise. Use bullet points and headers only when they help clarity.\n"
-            "7. Do NOT start with 'Engineering Report' headers unless the user explicitly asked for a report."
+            "2. If they ask for a list (e.g. 'top 5 questions', 'list all HTTP methods', 'list every dependency'), give them the COMPLETE list from Verified Evidence without omitting items.\n"
+            "3. If they ask to 'show the function', 'show the code', or 'show the implementation', include the VERBATIM code block from Verified Evidence—do NOT just summarize it in prose.\n"
+            "4. If they ask about data or content in files (e.g. questions, configs, dependencies), extract and present that DATA—do NOT describe the code structure that processes it.\n"
+            "5. Copy every file path EXACTLY character-for-character from Verified Evidence (never alter path spelling).\n"
+            "6. Ignore any irrelevant external web snippets that do not directly relate to the active repository or query.\n"
+            "7. Keep your answer focused and concise. Do NOT start with 'Engineering Report' headers unless explicitly requested."
         )
     )
     synth_prompt = f"""Rules:

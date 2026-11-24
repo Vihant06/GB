@@ -36,6 +36,7 @@ from app.tools.web_docs import (
 
 repo_intel_tools = [
     list_repo_files,
+    search_code_pattern,
     inspect_python_symbols,
     read_file_lines,
     read_project_dependencies,
@@ -75,29 +76,30 @@ repo_intel_agent = build_specialist(
     tools=repo_intel_tools,
     system_prompt=(
         "You are the Repository Intelligence Agent for RepoMind.\n"
-        "Your job is to FIND the information needed to ANSWER the developer's question.\n"
+        "Your job is to FIND the exact information needed to ANSWER the developer's question.\n"
         "Inspect code structure, classes, functions, imports, execution flow, manifests, data files, and external docs.\n"
         "Rules:\n"
-        "1. Never guess file names, function names, attributes, or line numbers.\n"
-        "2. When investigating repository purpose, overview, architecture, or general features:\n"
+        "1. Never guess or alter file names, function names, attributes, or line numbers. Copy file paths character-for-character from tool outputs.\n"
+        "2. Use search_code_pattern first when looking for specific methods, decorators, HTTP verbs, error handlers, or symbols across the repo.\n"
+        "3. When investigating repository purpose, overview, architecture, or general features:\n"
         "   - Call list_repo_files to discover the repository layout.\n"
-        "   - Read README.md, package.json, pyproject.toml, requirements.txt, and main entrypoint files (e.g. app.js, app.py, main.py, index.js) with read_file_lines.\n"
-        "   - Always cite the exact lines you read (e.g. [package.json:L1-L25], [app.js:L1-L35], [README.md:L1-L30]).\n"
-        "3. When the question asks about DATA contained in files (lists, entries, configurations, questions, records):\n"
-        "   - Read those data files with read_file_lines and EXTRACT the actual content the user wants.\n"
-        "   - Include the actual data values in your evidence claims, not just descriptions of file structure.\n"
-        "4. Trace call sites and implementation bodies—do NOT emit multiple evidence items repeating the same class definition.\n"
-        "5. Never use placeholder line numbers like L1-L1 for mid-file code; always cite the exact start_line and end_line you read.\n"
-        "6. When verifying dependency APIs, call read_project_dependencies then context7_search_docs.\n"
-        "7. When asked to ingest a URL via Firecrawl, you MUST call firecrawl_ingest_docs."
+        "   - Read README.md, package.json, pyproject.toml, requirements.txt, and main entrypoint files with read_file_lines.\n"
+        "   - Always cite the exact lines you read (e.g. [package.json:L1-L25], [README.md:L1-L30]).\n"
+        "4. When asked about dependencies or manifests: call read_project_dependencies AND read_file_lines on pyproject.toml / requirements.txt / package.json so you have exact line numbers.\n"
+        "5. When asked to 'show the function', 'show the code', or 'list every/all X': read the full symbol/list with read_file_lines and include the VERBATIM code block or COMPLETE exhaustive list in your evidence claims—never truncate or summarize.\n"
+        "6. When the question asks about DATA contained in files (lists, entries, configurations, questions, records):\n"
+        "   - Read those data files with read_file_lines and EXTRACT the actual content values in your claims.\n"
+        "7. Never use placeholder line numbers like L1-L1 for mid-file code; always cite the exact start_line and end_line you read.\n"
+        "8. When verifying dependency APIs, call read_project_dependencies then context7_search_docs.\n"
+        "9. When asked to ingest a URL via Firecrawl, you MUST call firecrawl_ingest_docs."
     ),
     report_cls=SpecialistReport,
     finalize_instruction=(
         "Convert your findings into SpecialistReport. Every item must cover a distinct code path, data finding, or doc fact "
-        "with exact line numbers (never L1-L1 for mid-file functions) or exact CONTEXT7:/FIRECRAWL: tags. "
-        "When the user asked about data content in files, include the ACTUAL DATA VALUES in your claims, not just code structure descriptions."
+        "with EXACT verbatim file_path and exact line numbers (never L1-L1 for mid-file functions) or exact CONTEXT7:/FIRECRAWL: tags. "
+        "If the user asked to show code/functions or list all items, include the full verbatim code snippet or complete list in the claim."
     ),
-    max_steps=7,
+    max_steps=8,
 )
 
 change_impact_agent = build_specialist(
@@ -147,7 +149,8 @@ debugging_agent = build_specialist(
         "1. Check search_github_issues_and_ci for live GitHub Issues and recent CI failure runs.\n"
         "2. If the task mentions Exa, web search, or known external discussions, you MUST call exa_search_technical.\n"
         "3. Trace exceptions in local code using search_code_pattern and read_file_lines, citing exact line ranges (never L1-L1 for mid-file lines).\n"
-        "4. NEVER invent causal links between unrelated CI branches (e.g. Dependabot/CodeQL runs) and open GitHub issues unless logs explicitly prove they are connected."
+        "4. NEVER invent causal links between unrelated CI branches (e.g. Dependabot/CodeQL runs) and open GitHub issues unless logs explicitly prove they are connected.\n"
+        "5. NEVER include unrelated third-party web pages or docs that do not directly relate to the active repository."
     ),
     report_cls=DebuggingReport,
     finalize_instruction=(
