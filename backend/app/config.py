@@ -14,9 +14,12 @@ from dotenv import find_dotenv, load_dotenv
 # Base project directory (d:\GB)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load .env without silently overriding process-level environment variables
-_env_path = find_dotenv(usecwd=True) or (BASE_DIR / ".env")
-if Path(_env_path).exists():
+# Load .env from backend/ and project root without overriding process-level environment variables
+for _candidate_env in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+    if _candidate_env.exists():
+        load_dotenv(_candidate_env, override=False)
+_env_path = find_dotenv(usecwd=True)
+if _env_path and Path(_env_path).exists():
     load_dotenv(_env_path, override=False)
 
 
@@ -115,6 +118,7 @@ MAX_QUERY_CHARS = 2000
 
 # API Keys
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 EXA_API_KEY = os.getenv("EXA_API_KEY", "")
@@ -142,6 +146,7 @@ RATE_CFG = RateLimitConfig()
 # LLM Models
 PRIMARY_MODEL = os.getenv("REPOMIND_PRIMARY_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
 FAST_MODEL = os.getenv("REPOMIND_FAST_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+GROQ_MODEL = os.getenv("REPOMIND_GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 def create_chat_nvidia(model_name: str, max_tokens: int = 8192, temperature: float = 0.0):
@@ -155,10 +160,27 @@ def create_chat_nvidia(model_name: str, max_tokens: int = 8192, temperature: flo
     )
 
 
-# Lazily or direct instantiated clients
+def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float = 0.0):
+    """Instantiate a ChatGroq client for ultra-low-latency inference."""
+    from langchain_groq import ChatGroq
+    return ChatGroq(
+        model=model_name,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+# Lazily or direct instantiated clients (prefer Groq for low-latency if GROQ_API_KEY is configured)
 try:
-    llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
-    fast_llm = create_chat_nvidia(FAST_MODEL, max_tokens=8192, temperature=0.0)
+    if GROQ_API_KEY:
+        fast_llm = create_chat_groq(GROQ_MODEL, max_tokens=2048, temperature=0.0)
+        if os.getenv("REPOMIND_PREFER_NIM_PRIMARY", "false").lower() in ("true", "1", "yes") and NVIDIA_API_KEY:
+            llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
+        else:
+            llm = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0)
+    else:
+        llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
+        fast_llm = create_chat_nvidia(FAST_MODEL, max_tokens=8192, temperature=0.0)
 except Exception:
     # Allows offline testing/mocking without failing on import
     llm = None  # type: ignore

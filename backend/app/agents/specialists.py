@@ -99,7 +99,7 @@ repo_intel_agent = build_specialist(
         "with EXACT verbatim file_path and exact line numbers (never L1-L1 for mid-file functions) or exact CONTEXT7:/FIRECRAWL: tags. "
         "If the user asked to show code/functions or list all items, include the full verbatim code snippet or complete list in the claim."
     ),
-    max_steps=8,
+    max_steps=5,
 )
 
 change_impact_agent = build_specialist(

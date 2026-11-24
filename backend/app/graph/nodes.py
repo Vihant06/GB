@@ -128,6 +128,21 @@ def classify_query_llm(query: str) -> tuple[str, str]:
     if any(part in q_lower for part in repo_parts if len(part) > 2):
         return "repo_specific", f"Query explicitly references '{current_repo_name}'."
 
+    # Fast deterministic repo_specific check for code symbols, file extensions, or FTS5 symbol hits
+    if (
+        re.search(r"\b[A-Z][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b", query)
+        or re.search(r"\b[A-Za-z0-9_./-]+\.(?:py|js|ts|tsx|jsx|md|toml|json|yaml|yml)\b", query)
+        or re.search(r"\b(?:__\w+__|def\s+\w+|class\s+\w+|apirouter|decorator|endpoint|wsgi|openapi)\b", q_lower)
+    ):
+        return "repo_specific", f"Query references code symbols or files in '{current_repo_name}'."
+
+    if current_repo_name:
+        try:
+            if query_repo_symbols_fts(current_repo_name, query, limit=1):
+                return "repo_specific", f"Query matched indexed symbols in '{current_repo_name}'."
+        except Exception:
+            pass
+
     if fast_llm is None and llm is None:
         # Fallback for offline testing without active LLM
         return "repo_specific", "Defaulting to repo_specific in offline mode."
@@ -444,12 +459,14 @@ def orchestrator_plan_node(state: RepoMindState):
     curr_repo = get_repo_full_name()
 
     context_msg = f"Developer Query: {state['user_query']}\nActive Repository: {curr_repo}\nAttempt: {attempt}/2"
+    fts_hint = ""
     if attempt == 1 and curr_repo:
         try:
             fts_hits = query_repo_symbols_fts(curr_repo, state["user_query"], limit=6)
             if fts_hits:
                 hit_lines = [f"- {fp}: {sym[:180]}" for fp, sym in fts_hits]
-                context_msg += "\n\nTop Indexed Candidate Files & Symbols (FTS5):\n" + "\n".join(hit_lines)
+                fts_hint = "\n".join(hit_lines)
+                context_msg += "\n\nTop Indexed Candidate Files & Symbols (FTS5):\n" + fts_hint
         except Exception:
             pass
     if prior_evidence:
@@ -493,6 +510,12 @@ def orchestrator_plan_node(state: RepoMindState):
                 "sub_query": f"Inspect repository context relevant to: {state['user_query'][:200]}",
             }
         ]
+
+    # Inject FTS5 candidate files directly into repository_intelligence sub_query to avoid cold search steps
+    if fts_hint:
+        for t in serialized_tasks:
+            if t.get("specialist") == "repository_intelligence":
+                t["sub_query"] = f"{t['sub_query']}\n\nCandidate files from FTS5 index (inspect these first):\n{fts_hint}"
 
     chosen = [t["specialist"] for t in serialized_tasks]
     return {
