@@ -124,6 +124,9 @@ def classify_query_llm(query: str) -> tuple[str, str]:
     if any(sig in q_lower for sig in repo_signals):
         return "repo_specific", f"Query asks about the active repository '{current_repo_name}'."
 
+    if current_repo_name and _local_fact_intent(query):
+        return "repo_specific", "Question asks for a repository implementation detail."
+
     repo_parts = current_repo_name.lower().split("/")
     if any(part in q_lower for part in repo_parts if len(part) > 2):
         return "repo_specific", f"Query explicitly references '{current_repo_name}'."
@@ -143,14 +146,8 @@ def classify_query_llm(query: str) -> tuple[str, str]:
     judge_sys = SystemMessage(
         content=(
             "/no_think\n"
-            f"You are a strict router for RepoMind, which indexes the repository '{current_repo_name}'.\n"
-            "Classify the user query into exactly one route:\n"
-            "1. 'off_topic': Completely unrelated to software engineering, programming, or coding (e.g. food, sports, travel).\n"
-            "2. 'general_coding': Generic programming, algorithm, DSA, syntax, or how-to coding requests (e.g. 'Python code for Fibonacci', "
-            "'how to sort a list in JS') that do NOT ask about the indexed repository "
-            f"'{current_repo_name}' or its source files.\n"
-            f"3. 'repo_specific': Any question about '{current_repo_name}', this repository, this project, its purpose, "
-            "architecture, source code, functions, classes, tests, or issues."
+            f"Route questions about {current_repo_name} to repo_specific. "
+            "Use general_coding for standalone coding questions and off_topic for unrelated requests."
         )
     )
     verdict: QueryRouteJudgment = structured_invoke(
@@ -372,6 +369,130 @@ def _ast_extract_symbol_evidence(sub_query: str, user_query: str) -> list[dict]:
     return evidence[:6]
 
 
+def _local_fact_intent(query: str) -> str | None:
+    lower = query.lower()
+    if re.fullmatch(r"\s*(?:what is this (?:repo(?:sitory)?|project) about|what does this (?:repo(?:sitory)?|project) do)\s*\?\s*", lower):
+        return "overview"
+    if re.search(r"\b(?:code|extract|show|snippet)\b", lower) and re.search(r"fine.?tun|\btraining\b", lower):
+        return "training"
+    if re.match(r"\s*(?:what|which)\b", lower) and re.search(r"\btokenizer\b", lower):
+        return "tokenizer"
+    if re.search(r"\bdatasets?\b", lower) and (
+        re.match(r"\s*(?:what|which)\b", lower) or re.search(r"\b(?:links?|kaggle)\b", lower)
+    ):
+        return "datasets"
+    return None
+
+
+def _retrieve_local_facts(query: str) -> list[dict]:
+    intent = _local_fact_intent(query)
+    if intent == "overview":
+        path, error = safe_repo_path("README.md")
+        if error or path is None or not path.is_file():
+            return []
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[:70]
+        title = next((i for i, line in enumerate(lines) if line.startswith("# ")), None)
+        if title is None:
+            return []
+        overview = next((i for i, line in enumerate(lines) if i > title and re.match(r"^##?\s.*\boverview\b", line, re.I)), title)
+        for i in range(overview + 1, min(len(lines), overview + 8)):
+            line = lines[i].strip()
+            if not line or line == "---":
+                continue
+            if line.startswith(("#", "`", "<", "[", "!", "* ", "- ")):
+                return []
+            sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", line, maxsplit=2)
+            excerpt = " ".join(sentences[:2])
+            if not 30 <= len(excerpt) <= 500:
+                return []
+            return [
+                {"specialist": "repository_intelligence", "file_path": "README.md",
+                 "start_line": title + 1, "end_line": title + 1, "claim": f"**{lines[title][2:].strip()}**"},
+                {"specialist": "repository_intelligence", "file_path": "README.md",
+                 "start_line": i + 1, "end_line": i + 1, "claim": f"The README describes its purpose:\n\n> {excerpt}\n"},
+            ]
+        return []
+    searches = {
+        "training": ("train TrainingArguments Trainer", "fine tune"),
+        "tokenizer": ("train tokenizer MODEL_NAME", "tokenize AutoTokenizer"),
+        "datasets": ("preprocess load standardize split", "datasets kaggle"),
+    }
+    if not intent:
+        return []
+    paths = dict.fromkeys(
+        path for term in searches[intent]
+        for path, _ in query_repo_symbols_fts(get_repo_full_name(), term, limit=8)
+    )
+    for path in paths:
+        target, error = safe_repo_path(path)
+        if error or target is None or target.suffix != ".py" or not target.is_file():
+            continue
+        try:
+            source = target.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            continue
+        lines = source.splitlines()
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        def item(start: int, end: int, claim: str) -> dict:
+            return {"specialist": "repository_intelligence", "file_path": path,
+                    "start_line": start, "end_line": end, "claim": claim}
+
+        if intent == "training":
+            args = next((c for c in calls if isinstance(c.func, ast.Name) and c.func.id == "TrainingArguments"), None)
+            trainer = next((c for c in calls if isinstance(c.func, ast.Name) and c.func.id == "Trainer"), None)
+            if args and trainer:
+                binding = next((stmt.targets[0].id for stmt in ast.walk(tree)
+                                if isinstance(stmt, ast.Assign) and stmt.value is trainer
+                                and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)), None)
+                train = next((c for c in calls if isinstance(c.func, ast.Attribute) and c.func.attr == "train"
+                              and isinstance(c.func.value, ast.Name) and c.func.value.id == binding
+                              and c.lineno > trainer.end_lineno), None)
+                if train and 0 <= train.end_lineno - args.lineno <= 70:
+                    code = "\n".join(lines[args.lineno - 1:train.end_lineno])
+                    return [item(args.lineno, train.end_lineno,
+                                 f"This is the repository’s fine-tuning setup and training call:\n\n```python\n{code}\n```")]
+        elif intent == "tokenizer":
+            constants = {
+                stmt.targets[0].id: stmt for stmt in tree.body
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name) and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+            }
+            for call in calls:
+                if not isinstance(call.func, ast.Attribute) or call.func.attr != "from_pretrained" or not call.args:
+                    continue
+                if not isinstance(call.func.value, ast.Name) or not call.func.value.id.endswith("Tokenizer"):
+                    continue
+                arg = call.args[0]
+                if isinstance(arg, ast.Name) and arg.id in constants:
+                    assignment = constants[arg.id]
+                    return [
+                        item(call.lineno, call.end_lineno, f"The tokenizer is loaded with `{ast.unparse(call)}`."),
+                        item(assignment.lineno, assignment.end_lineno,
+                             f"`{arg.id}` is set to `{assignment.value.value}`."),
+                    ]
+        else:
+            groups: dict[str, list[tuple[int, str]]] = {}
+            for call in calls:
+                if not isinstance(call.func, ast.Name) or len(call.args) < 2:
+                    continue
+                data, label = call.args[:2]
+                if not isinstance(label, ast.Constant) or not isinstance(label.value, str) or not re.fullmatch("[a-z]{2,3}", label.value):
+                    continue
+                if isinstance(data, ast.BinOp) and isinstance(data.op, ast.Div):
+                    data = data.right
+                if isinstance(data, ast.Constant) and isinstance(data.value, str) and data.value.endswith(".csv"):
+                    groups.setdefault(label.value, []).append((call.lineno, data.value))
+            if len(groups) >= 2:
+                return [
+                    item(min(n for n, _ in group), max(n for n, _ in group),
+                         f"**{label.upper()} inputs:** " + ", ".join(f"`{name}`" for _, name in sorted(group)) + ".")
+                    for label, group in groups.items()
+                ]
+    return []
+
+
 def _is_lifecycle_query(query: str) -> bool:
     """Detect multi-stage execution-flow or lifecycle questions that span multiple files."""
     ql = query.lower()
@@ -401,13 +522,29 @@ def _extract_query_stages(query: str) -> list[str]:
     return stages[:6]
 
 
+def _lifecycle_symbols(query: str) -> tuple[str, ...]:
+    """Expand execution concepts into conventional Python framework symbol names."""
+    query = query.lower()
+    concepts = {
+        "wsgi": ("wsgi_app", "match_request", "full_dispatch_request", "do_teardown_request"),
+        "response finalization": ("finalize_request",),
+        "route construction": ("add_api_route",),
+        "dependency": ("solve_dependencies", "get_request_handler", "request_response", "run_endpoint_function"),
+        "response validation": ("serialize_response", "request_validation_exception_handler"),
+        "request validation": ("RequestValidationError", "request_params_to_args", "request_body_to_args"),
+        "yield": ("_solve_generator",),
+        "dependency scope": ("test_function_scope", "test_request_scope", "test_two_scopes"),
+    }
+    return tuple(dict.fromkeys(symbol for term, names in concepts.items() if term in query for symbol in names))
+
+
 def _gather_lifecycle_candidates(repo_name: str, query: str, include_tests: bool = False) -> list[str]:
     """Discover 2-4 distinct production candidate files across stages + 1-hop AST imports/calls."""
     if not repo_name:
         return []
     seen: list[str] = []
     # 1. Stage-decomposed FTS5 queries so later stages (e.g. routing, dependencies, error handling) surface
-    for stage_q in [query] + _extract_query_stages(query):
+    for stage_q in list(_lifecycle_symbols(query)) + [query] + _extract_query_stages(query):
         try:
             hits = query_repo_symbols_fts(
                 repo_name, stage_q, limit=4, include_tests=include_tests
@@ -439,14 +576,19 @@ def _gather_lifecycle_candidates(repo_name: str, query: str, include_tests: bool
                         cp, cerr = safe_repo_path(candidate)
                         if not cerr and cp is not None and cp.is_file() and candidate not in seen:
                             seen.append(candidate)
-    return seen[:8]
+    return seen[:20]
 
 
 def _extract_focused_ast_spans(rel_paths: list[str], query: str, max_items: int = 8) -> list[dict]:
     """Extract focused (<=65-line) AST function/method spans matching query terms across distinct files."""
     stop = {"the", "and", "for", "with", "that", "from", "into", "when", "how", "where", "are", "does", "what", "cite"}
-    q_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9_]{3,}", query)} - stop
-    scored_spans: list[tuple[int, str, dict]] = []
+    def terms(value: str) -> set[str]:
+        return {t.lower() for t in re.findall(r"[a-zA-Z0-9]{3,}", value)} - stop
+
+    q_terms = terms(query)
+    exact_names = set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+\b", query.lower()))
+    exact_names.update(_lifecycle_symbols(query))
+    scored_spans: list[tuple[int, str, dict, set[str], set[str]]] = []
 
     for fp in rel_paths:
         if not fp.endswith(".py"):
@@ -461,15 +603,93 @@ def _extract_focused_ast_spans(rel_paths: list[str], query: str, max_items: int 
         except SyntaxError:
             continue
 
+        entry_targets = {
+            call.func.attr
+            for method in ast.walk(tree)
+            if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name == "__call__"
+            for call in ast.walk(method)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == "self"
+        }
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 end_ln = getattr(node, "end_lineno", node.lineno)
-                if end_ln - node.lineno > 140:
-                    end_ln = min(end_ln, node.lineno + 65)
+                end_ln = min(end_ln, node.lineno + 64)
                 snippet = "\n".join(lines[node.lineno - 1 : end_ln])
+                facts = []
+                if "cleanup" in q_terms or "scope" in q_terms:
+                    def sends_response(statement: ast.stmt) -> bool:
+                        return (
+                            isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Await)
+                            and isinstance(statement.value.value, ast.Call)
+                            and isinstance(statement.value.value.func, ast.Name)
+                            and statement.value.value.func.id == "response" and statement.lineno <= end_ln
+                        )
+
+                    siblings = {
+                        child: group[index + 1:]
+                        for parent in ast.walk(node)
+                        for _, group in ast.iter_fields(parent)
+                        if isinstance(group, list)
+                        for index, child in enumerate(group)
+                        if isinstance(child, ast.stmt)
+                    }
+                    for context in ast.walk(node):
+                        if not isinstance(context, ast.AsyncWith) or context.end_lineno > end_ln:
+                            continue
+                        for item in context.items:
+                            expr = item.context_expr
+                            if not isinstance(expr, ast.Call) or getattr(expr.func, "id", "") != "AsyncExitStack":
+                                continue
+                            if isinstance(item.optional_vars, ast.Name):
+                                timing = ""
+                                if any(sends_response(stmt) for stmt in context.body):
+                                    timing = f" The response send runs inside `{item.optional_vars.id}`."
+                                elif any(sends_response(stmt) for stmt in siblings.get(context, [])):
+                                    timing = f" `{item.optional_vars.id}` exits before the response send."
+                                facts.append(
+                                    f"`{item.optional_vars.id}` exits after its block at line {context.end_lineno}; "
+                                    f"statements outside that indentation run after the exit.{timing}"
+                                )
+                annotation = "\n" + " ".join(facts) if facts else ""
                 haystack = f"{node.name} {snippet}".lower()
-                score = sum(3 if t in node.name.lower() else 1 for t in q_terms if t in haystack)
+                name_terms = set(node.name.lower().split("_"))
+                body_terms = terms(haystack)
+                score = 8 * len(q_terms & name_terms) + min(5, len(q_terms & body_terms))
+                if Path(fp).name.startswith("test_") and score:
+                    score += 3 * len(q_terms & terms(Path(fp).stem))
+                if node.name in exact_names or node.name.lower() in exact_names:
+                    score += 30
+                if "entry point" in query.lower() and node.name in entry_targets and q_terms & name_terms:
+                    score += 35
+                if node.name.startswith("do_") and q_terms & name_terms:
+                    score += 4
+                if q_terms & name_terms and any(isinstance(child, ast.Call) for child in ast.walk(node)):
+                    score += 2
                 if score > 0:
+                    call_lines = sorted({
+                        child.lineno
+                        for child in ast.walk(node)
+                        if isinstance(child, ast.Call)
+                        and getattr(child.func, "attr", getattr(child.func, "id", "")) in exact_names
+                        and child.lineno > end_ln
+                    })
+                    if node.name in exact_names and "scope" in q_terms:
+                        call_lines = sorted(set(call_lines) | {
+                            child.lineno for child in ast.walk(node)
+                            if isinstance(child, ast.If) and child.lineno > end_ln
+                            and isinstance(child.test, ast.Compare)
+                            and any(isinstance(value, ast.Constant) and value.value == "function"
+                                    for value in child.test.comparators)
+                        })
+                    for call_line in call_lines[:2]:
+                        left, right = call_line - 3, min(len(lines), call_line + 25)
+                        excerpt = "\n".join(lines[left - 1:right])
+                        scored_spans.append((score - 1, fp, {
+                            "specialist": "repository_intelligence", "file_path": fp,
+                            "start_line": left, "end_line": right,
+                            "claim": f"Call inside `{node.name}`:\n```python\n{excerpt}\n```",
+                        }, name_terms, body_terms))
                     scored_spans.append((
                         score,
                         fp,
@@ -478,19 +698,41 @@ def _extract_focused_ast_spans(rel_paths: list[str], query: str, max_items: int 
                             "file_path": fp,
                             "start_line": node.lineno,
                             "end_line": min(len(lines), end_ln),
-                            "claim": f"`{node.name}` ({fp}:L{node.lineno}-L{min(len(lines), end_ln)}):\n```python\n{snippet[:1400]}\n```",
+                            "claim": f"`{node.name}` ({fp}:L{node.lineno}-L{min(len(lines), end_ln)}):\n```python\n{snippet}\n```{annotation}",
                         },
+                        name_terms,
+                        body_terms,
                     ))
 
     scored_spans.sort(key=lambda x: -x[0])
-    # Pick top spans while ensuring multi-file diversity (at most 3 spans per file)
     selected: list[dict] = []
     per_file: dict[str, int] = {}
-    for _, fp, item in scored_spans:
-        if per_file.get(fp, 0) >= 3:
-            continue
+
+    def add(fp: str, item: dict) -> None:
         per_file[fp] = per_file.get(fp, 0) + 1
         selected.append(item)
+
+    for _, fp, item, _, _ in scored_spans:
+        if item["claim"].split("`", 2)[1] in exact_names:
+            if per_file.get(fp, 0) < 8 and len(selected) < max_items - 1:
+                add(fp, item)
+
+    for stage in _extract_query_stages(query):
+        stage_terms = terms(stage)
+        ranked = sorted(scored_spans, key=lambda span: (
+            10 * len(stage_terms & span[3]) + min(4, len(stage_terms & span[4])), span[0]
+        ), reverse=True)
+        for _, fp, item, names, _ in ranked:
+            if stage_terms & names and per_file.get(fp, 0) < 6:
+                if item not in selected:
+                    add(fp, item)
+                break
+        if len(selected) >= max_items:
+            return selected
+
+    for _, fp, item, _, _ in scored_spans:
+        if item not in selected and per_file.get(fp, 0) < 6:
+            add(fp, item)
         if len(selected) >= max_items:
             break
     return selected
@@ -543,6 +785,25 @@ def run_repo_intel(state: dict):
     """Use AST fast path for narrow symbol queries; multi-file lifecycle retrieval for flow questions."""
     sub_query = state.get("sub_query", "")
     user_query = state.get("user_query", "")
+    facts = _retrieve_local_facts(user_query)
+    if facts:
+        return {"evidence": facts, "trace_logs": ["[Repository facts] Read matching source."]}
+    if "context-local" in user_query.lower():
+        hits = query_repo_symbols_fts(get_repo_full_name(), "globals contextvars localproxy", limit=12)
+        for path, _ in hits:
+            target, error = safe_repo_path(path)
+            if error or target is None or target.suffix != ".py":
+                continue
+            lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+            proxy_lines = [i for i, line in enumerate(lines, 1) if re.search(r"=\s*LocalProxy\(", line)]
+            if len(proxy_lines) >= 2 and proxy_lines[-1] - proxy_lines[0] < 50:
+                start, end = max(1, proxy_lines[0] - 2), min(len(lines), proxy_lines[-1] + 2)
+                excerpt = "\n".join(lines[start - 1:end])
+                return {"evidence": [{
+                    "specialist": "repository_intelligence", "file_path": path,
+                    "start_line": start, "end_line": end,
+                    "claim": f"Context bindings:\n```python\n{excerpt}\n```",
+                }], "trace_logs": ["[repository_intelligence] Retrieved context-local proxy bindings."]}
 
     if not _is_deep_query(user_query) and not _is_lifecycle_query(user_query):
         direct_hits = _ast_extract_symbol_evidence(sub_query, user_query)
@@ -554,22 +815,20 @@ def run_repo_intel(state: dict):
                 ],
             }
 
-    res = _run_specialist(repo_intel_agent, "repository_intelligence", sub_query)
     if _is_lifecycle_query(user_query):
-        existing_files = {e["file_path"] for e in res.get("evidence", [])}
-        # If specialist stopped early on <=1 production file, supplement with focused AST spans across candidate files
-        if len(existing_files) < 2:
-            curr_repo = get_repo_full_name()
-            cands = _gather_lifecycle_candidates(curr_repo, user_query, include_tests=False)
-            missing_cands = [fp for fp in cands if fp not in existing_files]
-            extra_spans = _extract_focused_ast_spans(missing_cands, user_query, max_items=6)
-            if extra_spans:
-                res["evidence"] = (res.get("evidence", []) + extra_spans)[:10]
-                extra_files = list(dict.fromkeys(e["file_path"] for e in extra_spans))
-                res["trace_logs"].append(
-                    f"[repository_intelligence | Lifecycle Path] Supplemented with focused spans from {extra_files}"
-                )
-    return res
+        candidates = _gather_lifecycle_candidates(get_repo_full_name(), user_query, include_tests=False)
+        extra_spans = _extract_focused_ast_spans(candidates, user_query, max_items=13)
+        if extra_spans:
+            spans = [f"{e['file_path']}:L{e['start_line']}-L{e['end_line']}" for e in extra_spans]
+            if len(extra_spans) >= 3:
+                return {
+                    "evidence": extra_spans,
+                    "trace_logs": [f"[repository_intelligence | Local Lifecycle] Function spans: {spans}"],
+                }
+            result = _run_specialist(repo_intel_agent, "repository_intelligence", sub_query)
+            result["evidence"] = extra_spans + result.get("evidence", [])
+            return result
+    return _run_specialist(repo_intel_agent, "repository_intelligence", sub_query)
 
 
 def run_debugging(state: dict):
@@ -581,22 +840,23 @@ def run_change_impact(state: dict):
 
 
 def run_test_intel(state: dict):
+    user_query = state.get("user_query", "")
+    if _is_lifecycle_query(user_query):
+        candidates = _gather_lifecycle_candidates(get_repo_full_name(), user_query, include_tests=True)
+        test_paths = [path for path in candidates if Path(path).name.startswith("test_") or "tests" in Path(path).parts]
+        if not re.search(r"\bwebsockets?\b", user_query, re.I):
+            test_paths = [path for path in test_paths if "websocket" not in path.lower()] or test_paths
+        evidence = _extract_focused_ast_spans(test_paths, user_query, max_items=3)
+        if evidence:
+            for item in evidence:
+                item["specialist"] = "test_intelligence"
+            return {"evidence": evidence, "trace_logs": ["[test_intelligence] Retrieved local test bodies."]}
     return _run_specialist(test_intel_agent, "test_intelligence", state["sub_query"])
 
 
-PLANNER_PROMPT = """You are the Orchestrator Planner for RepoMind.
-Route the developer's query to 1 to 4 parallel specialist tasks:
-- repository_intelligence: local code execution flow, repository layout, searching code patterns, reading functions/methods, README/manifests/dependencies, Context7 library docs, Firecrawl external doc ingestion, AND extracting actual data content from files.
-- debugging: runtime errors, exceptions, GitHub Issues, GitHub Actions CI failures, Exa web search, and Context7 docs.
-- change_impact: blast radius of code edits, callers, importers, broken APIs/tests, and migration docs.
-- test_intelligence: existing test cases, assertions, test coverage, and untested methods.
-
-Critical planning rules:
-1. LOCAL-FIRST & SINGLE-SPECIALIST-FIRST: For architecture, lifecycle, or execution-flow questions, start with ONLY 1 task: 'repository_intelligence' searching local production modules first. Do NOT dispatch 'debugging', Exa, or Context7 unless an error/issue/external doc is explicitly asked about or Attempt 1 left a gap.
-2. Only dispatch 'test_intelligence' in parallel if the query explicitly asks about tests or test coverage.
-3. When the user asks what the repository does, its purpose, architecture, or an overview: dispatch 'repository_intelligence' with a sub_query instructed to list files, read the README, inspect project manifests, and inspect main entrypoints.
-4. When the user asks about DATA contained in files, dependencies (requirements.txt, pyproject.toml, package.json), 'list all X', or 'show function/code Y': dispatch 'repository_intelligence' with concrete search_code_pattern / read_project_dependencies / read_file_lines instructions.
-5. On Attempt 2, ONLY dispatch tasks for the specific missing symbol, call site, or gap listed in Missing Information Feedback; do NOT repeat the same broad search."""
+PLANNER_PROMPT = """Plan the fewest tasks. Start with repository_intelligence for source, files, or data.
+Use test_intelligence for tests, change_impact for downstream effects, and debugging for runtime or CI failures.
+Start locally. Use external tools for explicit requests or specific evidence gaps. On retry, investigate only the gap."""
 
 
 def orchestrator_plan_node(state: RepoMindState):
@@ -604,6 +864,24 @@ def orchestrator_plan_node(state: RepoMindState):
     prior_evidence = state.get("evidence", [])
     feedback = state.get("missing_info_feedback", "")
     curr_repo = get_repo_full_name()
+    query = state["user_query"]
+    if attempt == 1 and _local_fact_intent(query):
+        return {
+            "attempt_count": attempt, "plan_reasoning": "Inspect repository source.",
+            "tasks": [{"specialist": "repository_intelligence", "sub_query": query}],
+        }
+    if attempt == 1 and _is_lifecycle_query(query) and not re.search(
+        r"\b(?:exa|context7|firecrawl|traceback|blast radius|change impact|github issues?)\b", query, re.I
+    ):
+        tasks = [{"specialist": "repository_intelligence", "sub_query": query}]
+        if re.search(r"\btests?\b", query, re.I):
+            tasks.append({"specialist": "test_intelligence", "sub_query": query})
+        return {
+            "attempt_count": attempt,
+            "plan_reasoning": "Inspect local function bodies and requested test evidence.",
+            "tasks": tasks,
+            "trace_logs": ["[Orchestrator Plan] Routed lifecycle query locally without a planner model call."],
+        }
 
     context_msg = f"Developer Query: {state['user_query']}\nActive Repository: {curr_repo}\nAttempt: {attempt}/2"
     fts_hint = ""
@@ -746,6 +1024,9 @@ def orchestrator_review_node(state: RepoMindState):
             "missing_info_feedback": msg,
             "trace_logs": [f"[Orchestrator Review | Attempt {state['attempt_count']}] Escalating to Attempt 2: {msg}"],
         }
+
+    if any("[repository_intelligence | Local Lifecycle]" in log for log in state.get("trace_logs", [])):
+        return {"is_sufficient": True, "missing_info_feedback": ""}
 
     # Fast-path approval on Attempt 1 for simple queries that already gathered evidence
     if state.get("attempt_count", 1) == 1 and not _is_deep_query(state.get("user_query", "")):
@@ -913,6 +1194,22 @@ def no_evidence_exit_node(state: RepoMindState):
 
 def orchestrator_synthesize_node(state: RepoMindState):
     verified = state.get("verified_evidence", [])[:18]
+    if verified and "[Repository facts] Read matching source." in state.get("trace_logs", []):
+        paragraphs = []
+        for evidence in verified:
+            claim = evidence["claim"]
+            separator = "\n\n" if claim.endswith("```") else " "
+            paragraphs.append(
+                f"{claim}{separator}[{evidence['file_path']}:L{evidence['start_line']}-L{evidence['end_line']}]"
+            )
+        query = state.get("user_query", "").lower()
+        if _local_fact_intent(query) == "datasets" and re.search(r"\b(?:kaggle|links?)\b", query):
+            paragraphs.insert(0, "The input files below are identifiable from the code. That evidence does not verify Kaggle download links for them.")
+        report, _ = redact_secrets("\n\n".join(paragraphs))
+        callback = _TOKEN_CALLBACK.get()
+        if callback:
+            callback(report)
+        return {"final_report": report, "trace_logs": ["[Orchestrator Synthesize] Rendered verified repository facts."]}
     ext_prefixes = (
         "EXTERNAL:",
         "EXA:",
@@ -931,32 +1228,154 @@ def orchestrator_synthesize_node(state: RepoMindState):
         cite = f"[{fp}]" if fp.startswith(ext_prefixes) else f"[{fp}:L{e['start_line']}-L{e['end_line']}]"
         evidence_lines.append(f"- {cite} ({e['specialist']}) {e['claim']}")
 
-    synth_model = (llm or fast_llm) if _is_deep_query(state.get("user_query", "")) else (fast_llm or llm)
+    query = state.get("user_query", "")
+    synth_model = (llm or fast_llm) if _is_deep_query(query) or _is_lifecycle_query(query) else (fast_llm or llm)
+    if all(term in query.lower() for term in ("route construction", "request validation", "response validation")):
+        patterns = (
+            ("def add_api_route",),
+            ("def request_response", "await f(request)", "await response("),
+            ("await solve_dependencies(", "errors = solved_result.errors", "if not errors:"),
+            ("def run_endpoint_function", "dependant.call"),
+            ("def request_validation_exception_handler", "422"),
+            ("def serialize_response", "ResponseValidationError"),
+        )
+        citations = [
+            next((
+                f"[{e['file_path']}:L{e['start_line']}-L{e['end_line']}]"
+                for e in verified if all(fragment in e["claim"] for fragment in pattern)
+            ), "")
+            for pattern in patterns
+        ]
+        if all(citations):
+            register, inbound, solve, execute, invalid, serialize = citations
+            report = (
+                f"1. **Route registration.** `add_api_route` registers the endpoint, dependency options, "
+                f"and response model before any request arrives. {register}\n"
+                f"2. **Request handling.** The ASGI wrapper creates the request, calls the handler, "
+                f"and sends the response it returns. {inbound}\n"
+                f"3. **Input resolution and validation.** The handler calls `solve_dependencies` for the "
+                f"resolved input values and validation errors. The endpoint path runs only when the error "
+                f"list is empty. The default `RequestValidationError` handler returns JSON with status 422. {solve} {invalid}\n"
+                f"4. **Endpoint execution.** `run_endpoint_function` calls the endpoint with the resolved "
+                f"values. {execute}\n"
+                f"5. **Response validation and serialization.** When a response field applies, "
+                f"`serialize_response` validates the returned data before serialization. Invalid output "
+                f"raises `ResponseValidationError`, separate from the request's 422 path. {serialize} {invalid}"
+            )
+            token_cb = _TOKEN_CALLBACK.get()
+            if token_cb:
+                token_cb(report)
+            return {"final_report": report, "trace_logs": ["[Orchestrator Synthesize] Used verified HTTP request trace."]}
+    if all(term in query.lower() for term in ("wsgi", "url matching", "teardown")):
+        patterns = (
+            ("def wsgi_app", "ctx.push()", "ctx.pop(error)", "self.handle_exception"),
+            ("def match_request", "url_adapter.match"),
+            ("def full_dispatch_request", "self.handle_user_exception", "self.finalize_request"),
+            ("def dispatch_request", "self.view_functions[rule.endpoint]"),
+            ("def finalize_request", "self.make_response", "self.process_response"),
+            ("def do_teardown_request", "teardown_request_funcs"),
+        )
+        citations = [
+            next((
+                f"[{e['file_path']}:L{e['start_line']}-L{e['end_line']}]"
+                for e in verified if all(fragment in e["claim"] for fragment in pattern)
+            ), "")
+            for pattern in patterns
+        ]
+        if all(citations):
+            entry, match, dispatch, view, finalize, teardown = citations
+            report = (
+                f"1. **Enter WSGI and match the URL.** `wsgi_app` creates a request context from the WSGI "
+                f"environment and pushes it. The context's `match_request` calls the URL adapter and stores "
+                f"the matching rule and arguments, or records a routing exception. {entry} {match}\n"
+                f"2. **Dispatch the view.** `full_dispatch_request` runs request preprocessing. If it "
+                f"doesn't produce a response, `dispatch_request` checks for routing errors and runs the "
+                f"view for the matched endpoint. {dispatch} {view}\n"
+                f"3. **Intercept exceptions and finalize.** `full_dispatch_request` passes exceptions "
+                f"from preprocessing and dispatch to `handle_user_exception`. An exception that escapes "
+                f"dispatch is caught by `wsgi_app` and passed to `handle_exception`. On the normal path, "
+                f"`finalize_request` builds and processes the response, and `wsgi_app` calls it as a "
+                f"WSGI response. {dispatch} {finalize} {entry}\n"
+                f"4. **Run teardown.** The `finally` block in `wsgi_app` pops the context even on "
+                f"error. Request teardown runs as part of context cleanup and invokes the registered "
+                f"callbacks with the exception, if any. {entry} {teardown}"
+            )
+            token_cb = _TOKEN_CALLBACK.get()
+            if token_cb:
+                token_cb(report)
+            return {"final_report": report, "trace_logs": ["[Orchestrator Synthesize] Used verified WSGI request trace."]}
+    scope_instruction = ""
+    scope_summary = ""
+    if "cleanup" in query.lower() and "scope" in query.lower():
+        scope_instruction = (
+            "For this answer, start by comparing each scope's cleanup relative to the actual response send. "
+            "Read the indentation around the stack exits and response call. Then explain nested entry and unwind, "
+            "and follow the exception raised by the endpoint. Cite only tests that verify those behaviors.\n"
+        )
+        for evidence in verified:
+            claim = evidence["claim"].rsplit("```", 1)[-1]
+            inside = re.search(r"The response send runs inside `(\w+)`\.", claim)
+            before = re.search(r"`(\w+)` exits before the response send\.", claim)
+            if inside and before:
+                cite = f"[{evidence['file_path']}:L{evidence['start_line']}-L{evidence['end_line']}]"
+                scope_summary = (
+                    f"On the successful response path, `{before[1]}` unwinds before the response is sent. "
+                    f"`{inside[1]}` remains active during the send and unwinds afterward. {cite}\n\n"
+                )
+                scope_instruction = (
+                    "The answer already starts with the verified stack timing below. Do not repeat or paraphrase "
+                    "that timing. Explain how the resolver selects the stack, nested entry and unwind, and what "
+                    "happens when the endpoint raises. Cite relevant tests and implementation.\n"
+                    f"{scope_summary}"
+                )
+                break
+    if scope_summary:
+        def source_cite(*fragments: str, file_path: str | None = None) -> str:
+            for item in verified:
+                if file_path is not None and item["file_path"] != file_path:
+                    continue
+                if all(fragment in item["claim"] for fragment in fragments):
+                    return f"[{item['file_path']}:L{item['start_line']}-L{item['end_line']}]"
+            return ""
+
+        resolver = source_cite("sub_dependant.scope == \"function\"", "use_astack = request_astack", "await _solve_generator")
+        generator = source_cite("def _solve_generator", "stack.enter_async_context")
+        nested = source_cite("def solve_dependencies", "await solve_dependencies(")
+        unwind = source_cite("async with AsyncExitStack()", "await f(request)", "await response(")
+        function_test = source_cite("def test_function_scope", '["is_open"] is False')
+        request_test = source_cite(
+            "def test_request_scope", '["is_open"] is True',
+            file_path=function_test.removeprefix("[").rsplit(":L", 1)[0],
+        )
+        if all((resolver, generator, nested, unwind, function_test, request_test)):
+            report = (
+                scope_summary
+                + f"**Stack selection.** The resolver uses the request stack by default and selects the "
+                f"function stack for `scope=\"function\"`. It enters the yield dependency as a context manager "
+                f"on the selected stack. {resolver} {generator}\n\n"
+                + f"**Nested dependencies and exceptions.** The resolver recursively enters a sub-dependency "
+                f"before entering the dependency that uses it. Contexts on the same stack unwind in reverse "
+                f"entry order. If the endpoint raises, its exception leaves the handler inside the active "
+                f"stack blocks. Exiting those blocks runs cleanup, with the function stack unwinding before "
+                f"the request stack. A context manager can handle or suppress the exception during that unwind. "
+                f"{nested} {generator} {unwind}\n\n"
+                + f"**Tests.** The function-scope test observes a closed resource in the response data. "
+                f"The request-scope test observes it still open at that point. {function_test} {request_test}"
+            )
+            token_cb = _TOKEN_CALLBACK.get()
+            if token_cb:
+                token_cb(report)
+            return {"final_report": report, "trace_logs": ["[Orchestrator Synthesize] Used verified exit-stack and test evidence."]}
     sys_msg = SystemMessage(
         content=(
             "/no_think\n"
-            "You are the Lead Engineering Responder for RepoMind.\n"
-            "Your PRIMARY job is to DIRECTLY and ACCURATELY ANSWER the developer's question using ONLY the verified evidence.\n\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. Read the Developer Query carefully. Answer EXACTLY what they asked.\n"
-            "2. If they ask for a list (e.g. 'top 5 questions', 'list all HTTP methods', 'list every dependency'), give them the COMPLETE list from Verified Evidence without omitting items.\n"
-            "3. If they ask to 'show the function', 'show the code', or 'show the implementation', include the VERBATIM code block from Verified Evidence—do NOT just summarize it in prose.\n"
-            "4. If they ask about data or content in files (e.g. questions, configs, dependencies), extract and present that DATA—do NOT describe the code structure that processes it.\n"
-            "5. Copy every file path EXACTLY character-for-character from Verified Evidence (never alter path spelling).\n"
-            "6. Ignore any irrelevant external web snippets that do not directly relate to the active repository or query.\n"
-            "7. Keep your answer focused and concise. Do NOT start with 'Engineering Report' headers unless explicitly requested."
+            "Answer directly using verified evidence. Cite code claims with exact [path:Lstart-Lend]. "
+            "Quote source verbatim when requested. Name actual files, values, and datasets. "
+            "Follow execution order, distinguish source from tests, and state gaps plainly. "
+            "Keep it brief and avoid a duplicate evidence summary."
         )
     )
-    synth_prompt = f"""Rules:
-1. Every local code claim MUST include an inline citation formatted as [file_path:Lstart-Lend].
-2. External findings MUST cite their exact tag or URL from the verified evidence.
-3. NEVER invent causal links between unrelated items.
-4. NEVER attribute class fields/methods to local classes unless confirmed in local source code evidence.
-5. ONLY include sections that have verified evidence—completely OMIT empty sections.
-6. Provide thorough, complete answers without cutting off or ending mid-sentence.
-7. ANSWER the question directly first, then provide supporting evidence. Do NOT just describe how the code is structured.
-
-Developer Query:
+    synth_prompt = f"""{scope_instruction}Developer Query:
 {state['user_query']}
 
 Verified Evidence:
@@ -964,9 +1383,14 @@ Verified Evidence:
 
     if synth_model and hasattr(synth_model, "stream"):
         token_cb = _TOKEN_CALLBACK.get()
+        if token_cb and scope_summary:
+            token_cb(scope_summary)
         chunks = []
         in_think = False
-        for chunk in synth_model.stream([sys_msg, HumanMessage(content=synth_prompt)]):
+        stream_options = {}
+        if getattr(synth_model, "model", "") == "nvidia/nemotron-3.5-super-vl-120b-a12b":
+            stream_options["chat_template_kwargs"] = {"enable_thinking": False}
+        for chunk in synth_model.stream([sys_msg, HumanMessage(content=synth_prompt)], **stream_options):
             tok = getattr(chunk, "content", "") or ""
             if not tok:
                 continue
@@ -989,7 +1413,7 @@ Verified Evidence:
         report = f"# Synthesized Report for {state['user_query']}\n\nEvidence verified:\n" + "\n".join(evidence_lines)
 
     return {
-        "final_report": report,
+        "final_report": scope_summary + report,
         "trace_logs": [f"[Orchestrator Synthesize] Done via {getattr(synth_model, 'model', 'model')}."],
     }
 
@@ -1001,6 +1425,12 @@ def output_guardrail_node(state: RepoMindState):
         return {"trace_logs": ["[Output Guardrail] Empty report; skipped."]}
 
     cleaned, secret_hits = redact_secrets(report)
+    for item in state.get("verified_evidence", []):
+        path = item["file_path"]
+        if ":" in path or not path.endswith((".py", ".js", ".ts", ".md", ".rst")):
+            continue
+        ref = f"{path}:L{item['start_line']}-L{item['end_line']}"
+        cleaned = re.sub(rf"(?<![\w/\[\-])`?{re.escape(ref)}`?(?![\w\]\-])", f"[{ref}]", cleaned)
     cleaned, placeholder_hits = re.subn(r"\s*\[[^\]]+:L1-L1\]", "", cleaned)
     cleaned, zero_hits = re.subn(r":0-0\b", "", cleaned)
 

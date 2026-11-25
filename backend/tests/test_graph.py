@@ -126,6 +126,30 @@ def test_lifecycle_retrieval_across_files():
             set_active_repo(orig_name, orig_root)
 
 
+def test_exact_repository_training_extract():
+    from app.config import get_repo_full_name, get_repo_root, set_active_repo
+    from app.graph.nodes import _retrieve_local_facts
+
+    original = get_repo_full_name(), get_repo_root()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "train.py").write_text(
+            "args = TrainingArguments(num_train_epochs=3)\n"
+            "trainer = Trainer(model=model, args=args)\n"
+            "other.train()\n"
+            "trainer.train()\n",
+            encoding="utf-8",
+        )
+        try:
+            set_active_repo("test/train", root)
+            with patch("app.graph.nodes.query_repo_symbols_fts", return_value=[("train.py", "")]):
+                [evidence] = _retrieve_local_facts("Extract the fine-tuning code from this repo.")
+            assert (evidence["start_line"], evidence["end_line"]) == (1, 4)
+            assert "trainer.train()\n```" in evidence["claim"]
+        finally:
+            set_active_repo(*original)
+
+
 def test_specialist_routing_smallest_set():
     fake_plan = InvestigationPlan(
         reasoning="Full trace",

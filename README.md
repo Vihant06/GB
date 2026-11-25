@@ -28,7 +28,7 @@ flowchart TD
     Reviewer -->|Sufficient or Attempt = 2| Verifier[Strict Citation Verifier]
     
     Verifier -->|No Verified Citations| NoEvidence[No Evidence Exit]
-    Verifier -->|Verified Citations [file:Lstart-Lend]| Synthesis[Orchestrator Synthesis]
+    Verifier -->|Verified file and line citations| Synthesis[Orchestrator Synthesis]
     
     FastPath & Reject & NoEvidence & Synthesis --> OutputGuardrail[Output Guardrails & Secret Redaction]
     OutputGuardrail --> ClientStream[SSE / JSON Client Response]

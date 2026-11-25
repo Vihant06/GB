@@ -25,8 +25,8 @@ function getAiStatusState(step?: string): 'thinking' | 'researching' | 'analyzin
   if (!step) return 'thinking';
   const lower = step.toLowerCase();
   if (lower.includes('plan') || lower.includes('orchestrat')) return 'thinking';
-  if (lower.includes('research') || lower.includes('specialist') || lower.includes('evidence') || lower.includes('repo')) return 'researching';
-  if (lower.includes('verif') || lower.includes('citation') || lower.includes('analyz')) return 'analyzing';
+  if (lower.startsWith('looking')) return 'researching';
+  if (lower.startsWith('checking')) return 'analyzing';
   if (lower.includes('synthes') || lower.includes('token') || lower.includes('report') || lower.includes('writ')) return 'writing';
   return 'thinking';
 }
@@ -37,27 +37,27 @@ function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): W
 
   // 1. Extract verified file citations from message text (e.g. [app/main.py:L14-L45] or [file:app/main.py:L14-L45])
   if (message.text) {
-    const citationRegex = /\[(?:file:)?([^:\]\s]+)(?::L(\d+)(?:-L(\d+))?)?\]/g;
+    const citationRegex = /\[(?:file:)?([^:\]\s]+):L(\d+)(?:-L(\d+))?\]/g;
+    const verifiedCitations = new Set(message.verifiedCitations ?? []);
     let match;
     while ((match = citationRegex.exec(message.text)) !== null) {
       const rawPath = match[1];
       const startLine = match[2];
       const endLine = match[3];
-      const hasLineRef = Boolean(startLine);
-      const looksLikeFilePath = /[/.]/.test(rawPath) && !/^[A-Z0-9_]+$/.test(rawPath);
+      const citation = `${rawPath}:L${startLine}-L${endLine ?? startLine}`;
       if (
         rawPath &&
-        (hasLineRef || looksLikeFilePath) &&
+        verifiedCitations.has(citation) &&
         !rawPath.startsWith('http') &&
         !rawPath.includes(' ') &&
-        !seenIds.has(rawPath)
+        !seenIds.has(citation)
       ) {
-        seenIds.add(rawPath);
+        seenIds.add(citation);
         const lineFragment = startLine ? (endLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`) : '';
         const lineLabel = startLine ? (endLine ? `:L${startLine}-L${endLine}` : `:L${startLine}`) : '';
         const url = repo ? `${repo.url}/blob/main/${rawPath}${lineFragment}` : `#${rawPath}`;
         sources.push({
-          id: `citation-${rawPath}`,
+          id: `citation-${citation}`,
           title: `${rawPath}${lineLabel}`,
           url,
           snippet: `Verified line-level codebase citation from ${rawPath}`,
@@ -66,56 +66,6 @@ function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): W
     }
   }
 
-  // 2. Extract external doc searches, crawled pages, and GitHub syncs from trace logs
-  if (message.traceLogs) {
-    for (const log of message.traceLogs) {
-      if (log.includes('[Context7]') || log.includes('Context7')) {
-        const id = 'ext-context7';
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          sources.push({
-            id,
-            title: 'Context7 Technical Documentation',
-            url: 'https://context7.com',
-            snippet: log.replace(/^\[Context7\]\s*/, '').slice(0, 140),
-          });
-        }
-      } else if (log.includes('[Exa]') || log.includes('Exa search')) {
-        const id = 'ext-exa';
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          sources.push({
-            id,
-            title: 'Exa Live Web Search',
-            url: 'https://exa.ai',
-            snippet: log.replace(/^\[Exa\]\s*/, '').slice(0, 140),
-          });
-        }
-      } else if (log.includes('[Firecrawl]') || log.includes('Firecrawl')) {
-        const id = 'ext-firecrawl';
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          sources.push({
-            id,
-            title: 'Firecrawl Crawled Documentation',
-            url: 'https://firecrawl.dev',
-            snippet: log.replace(/^\[Firecrawl\]\s*/, '').slice(0, 140),
-          });
-        }
-      } else if (log.includes('GitHub issues') || log.includes('GitHub CI')) {
-        const id = 'ext-github-sync';
-        if (!seenIds.has(id)) {
-          seenIds.add(id);
-          sources.push({
-            id,
-            title: repo ? `${repo.name} Issues & CI Runs` : 'GitHub Issues & CI',
-            url: repo ? `${repo.url}/issues` : 'https://github.com',
-            snippet: log.slice(0, 140),
-          });
-        }
-      }
-    }
-  }
 
   return sources;
 }
@@ -418,14 +368,9 @@ export function ChatSessionPane({
                       {!isUser && messageSources.length > 0 && !message.isStreaming && (
                         <div className="mb-3">
                           <WebSearch
-                            query={
-                              messageSources.some((s) => s.id.startsWith('ext-'))
-                                ? 'External Documentation & Web Search'
-                                : messageRepo
-                                ? `${messageRepo.name} Verified Sources`
-                                : 'Verified Codebase Citations'
-                            }
+                            query={messageRepo ? `${messageRepo.name} Verified Sources` : 'Verified Codebase Citations'}
                             sources={messageSources}
+                            label={`${messageSources.length} verified ${messageSources.length === 1 ? 'source' : 'sources'}`}
                             status="done"
                             className="w-full font-mono text-xs"
                           />

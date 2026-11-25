@@ -62,5 +62,8 @@ def test_query_streaming_sse():
         body = response.text
         assert "event: status" in body
         assert "event: progress" in body
+        progress_events = [event for event in body.split("\n\n") if event.startswith("event: progress")]
+        assert progress_events and all("Plan ready" not in event and "[Plan]" not in event for event in progress_events)
+        assert any("Understanding your question" in event for event in progress_events)
         assert "event: token" in body
         assert "event: complete" in body

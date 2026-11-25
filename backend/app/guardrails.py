@@ -25,6 +25,7 @@ REPO_ROOT: Path | None = None
 _INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions",
     r"reveal\s+(your\s+)?(system\s+prompt|api[_\s]?key|secret|token|\.env)",
+    r"\b(?:give|show|share|print|tell)\s+(?:me\s+)?(?:your\s+|the\s+)?(?:api[ _-]?keys?\s+you\s+us(?:e|ed)|(?:hidden\s+|internal\s+|your\s+)?system\s+prompt(?:\s+of\s+your\b|\s+you\s+use\b|\s*$))",
     r"(show|print|leak|expose|dump)\s+(me\s+)?(all\s+)?(env\s*vars?|environment\s+variables|secrets?|api[_\s]?keys?|credentials|os\.environ|process\.env|\.env)",
     r"\bdrop\s+table\b",
     r"<\s*script\b",

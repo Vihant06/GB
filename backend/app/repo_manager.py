@@ -35,6 +35,21 @@ from app.tools.github_sync import sync_github_issues
 os.environ["GIT_LFS_SKIP_SMUDGE"] = "1"
 
 logger = logging.getLogger("repomind.repo_manager")
+_ready_indexes: dict[tuple[str, Path], tuple[str, Dict[str, Any]]] = {}
+
+
+def prepare_query_repo(repo_url_or_slug: str) -> Dict[str, Any]:
+    """Reuse an index built by this process for the current clean checkout."""
+    owner, name, _ = parse_github_url(repo_url_or_slug)
+    path = BASE_DIR / "data" / "repositories" / f"{owner}_{name}"
+    full_name = f"{owner}/{name}"
+    cached = _ready_indexes.get((full_name, path))
+    if cached and (path / ".git").exists():
+        with Repo(path) as repo:
+            if repo.head.commit.hexsha == cached[0] and not repo.is_dirty(untracked_files=True):
+                set_active_repo(full_name, path)
+                return dict(cached[1])
+    return clone_and_index_repo(repo_url_or_slug)
 
 
 def _remove_readonly(func, path, excinfo):
@@ -223,9 +238,14 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
             except Exception:
                 fts_entries.append((rel_str, rel_str))
 
+    indexed_revision = None
     try:
+        with Repo(target_dir) as indexed_repo:
+            if not indexed_repo.is_dirty(untracked_files=True):
+                indexed_revision = indexed_repo.head.commit.hexsha
         index_repo_symbols(full_name, fts_entries)
     except Exception as e:
+        indexed_revision = None
         logger.debug("FTS5 repo symbol indexing skipped: %s", e)
 
     # Optional initial issue sync if token configured
@@ -237,7 +257,7 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
 
     effective_code_count = len(py_files) if py_files else len(code_files)
 
-    return {
+    result = {
         "status": "ready",
         "repo_name": full_name,
         "repo_url": canonical_url,
@@ -248,6 +268,11 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
         "sample_files": (py_files or code_files)[:10],
         "manifests": manifests,
     }
+    if indexed_revision:
+        _ready_indexes[(full_name, target_dir)] = (indexed_revision, result)
+    else:
+        _ready_indexes.pop((full_name, target_dir), None)
+    return result
 
 
 def get_active_repo_info() -> Dict[str, Any]:

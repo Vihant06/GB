@@ -25,7 +25,7 @@ from app.config import DB_PATH, get_repo_full_name, get_repo_root
 from app.database import connect_sqlite, init_db
 from app.graph.nodes import reset_token_callback, set_token_callback
 from app.graph.workflow import repomind_graph
-from app.repo_manager import clone_and_index_repo, get_active_repo_info
+from app.repo_manager import clone_and_index_repo, get_active_repo_info, prepare_query_repo
 from app.schemas import (
     HealthResponse,
     QueryRequest,
@@ -168,7 +168,7 @@ async def execute_query(
     """Execute a non-streaming query against RepoMind."""
     if request.repo_url:
         try:
-            await anyio.to_thread.run_sync(clone_and_index_repo, request.repo_url)
+            await anyio.to_thread.run_sync(prepare_query_repo, request.repo_url)
         except Exception as e:
             logger.warning("Could not dynamically prepare repository %s: %s", request.repo_url, e)
 
@@ -232,7 +232,7 @@ async def stream_query(
     """
     if request.repo_url:
         try:
-            await anyio.to_thread.run_sync(clone_and_index_repo, request.repo_url)
+            await anyio.to_thread.run_sync(prepare_query_repo, request.repo_url)
         except Exception as e:
             logger.warning("Could not dynamically prepare repository %s: %s", request.repo_url, e)
 
@@ -262,6 +262,7 @@ async def stream_query(
 
             final_report = ""
             collected_logs = []
+            verified_citations = []
             streamed_live_tokens = False
             sse_queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -312,24 +313,18 @@ async def stream_query(
                         logs = node_output.get("trace_logs", [])
                         if logs:
                             collected_logs.extend(logs)
-                            for log in logs:
-                                yield _format_sse(
-                                    "progress",
-                                    {"node": node_name, "message": _sanitize_log(log), "stage": node_name},
-                                )
 
                         if node_output.get("final_report"):
                             final_report = node_output["final_report"]
 
                         # Yield incremental stage progress
                         if node_name == "orchestrator_plan":
-                            reasoning = node_output.get("plan_reasoning", "")
                             yield _format_sse(
                                 "progress",
                                 {
                                     "node": "planner",
                                     "stage": "planning",
-                                    "message": f"Investigation Plan: {reasoning}",
+                                    "message": "Understanding your question",
                                 },
                             )
                         elif node_name in (
@@ -338,23 +333,25 @@ async def stream_query(
                             "change_impact",
                             "test_intelligence",
                         ):
-                            evidence_count = len(node_output.get("evidence", []))
                             yield _format_sse(
                                 "progress",
                                 {
                                     "node": node_name,
                                     "stage": "specialist",
-                                    "message": f"Specialist '{node_name}' gathered {evidence_count} evidence item(s).",
+                                    "message": "Looking through the repository",
                                 },
                             )
                         elif node_name == "verify_citations":
-                            verified_count = len(node_output.get("verified_evidence", []))
+                            verified = node_output.get("verified_evidence", [])
+                            verified_citations = list(dict.fromkeys(
+                                f"{e['file_path']}:L{e['start_line']}-L{e['end_line']}" for e in verified
+                            ))
                             yield _format_sse(
                                 "progress",
                                 {
                                     "node": "citation_verifier",
                                     "stage": "verification",
-                                    "message": f"Verified {verified_count} grounded citation(s).",
+                                    "message": "Checking the sources",
                                 },
                             )
 
@@ -386,6 +383,7 @@ async def stream_query(
                         "report": final_report,
                         "text": "",
                         "trace_logs": [_sanitize_log(l) for l in collected_logs],
+                        "verified_citations": verified_citations,
                         "usage": usage_dict,
                         "timing_ms": {"total_ms": total_ms, "ttft_ms": ttft_ms},
                         "done": True,
@@ -396,7 +394,7 @@ async def stream_query(
                 logger.exception("Error in /query/stream: %s", e)
                 yield _format_sse(
                     "error",
-                    {"error": f"Investigation failed: {str(e)}"},
+                    {"error": "RepoMind couldn’t complete this answer. Please try again."},
                 )
             finally:
                 reset_token_callback(cb_token)

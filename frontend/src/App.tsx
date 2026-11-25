@@ -242,9 +242,10 @@ export default function App() {
             text?: string;
             token?: string;
             report?: string;
-            message?: string;
             node?: string;
+            stage?: string;
             trace_logs?: string[];
+            verified_citations?: string[];
             error?: string;
             done?: boolean;
           } = {};
@@ -260,7 +261,19 @@ export default function App() {
 
           // Handle progress/status events
           if (eventType === 'progress' || eventType === 'status') {
-            const stepMsg = payload.message || '';
+            const labels: Record<string, string> = {
+              planning: 'Understanding your question',
+              specialist: activeRepo ? 'Looking through the repository' : 'Looking for relevant information',
+              verification: 'Checking the sources',
+              synthesis: 'Writing your answer',
+            };
+            const taskLabels: Record<string, string> = {
+              debugging: 'Checking where things went wrong',
+              change_impact: 'Checking what the change would affect',
+              test_intelligence: 'Looking for relevant tests',
+            };
+            const stepMsg = (payload.stage === 'specialist' && taskLabels[payload.node ?? ''])
+              || labels[payload.stage ?? ''] || 'Getting your answer ready';
             if (!botMessageAdded) {
               botMessageAdded = true;
               const initialBotMsg: ChatMessage = {
@@ -298,6 +311,7 @@ export default function App() {
                 senderLabel: 'RepoMind',
                 timestamp: replyTimestamp,
                 text: chunkText,
+                progressStep: 'Writing your answer',
                 isStreaming: true,
                 repoTarget: activeRepo ?? undefined,
               };
@@ -310,7 +324,7 @@ export default function App() {
                 ...prev,
                 messages: prev.messages.map((m) =>
                   m.id === botMsgId
-                    ? {...m, text: (m.text ?? '') + chunkText}
+                    ? {...m, progressStep: 'Writing your answer', text: (m.text ?? '') + chunkText}
                     : m
                 ),
               }));
@@ -330,6 +344,7 @@ export default function App() {
                       isStreaming: false,
                       progressStep: undefined,
                       traceLogs: payload.trace_logs,
+                      verifiedCitations: payload.verified_citations,
                     }
                   : m
               ),
