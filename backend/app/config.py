@@ -171,10 +171,10 @@ def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float
     )
 
 
-# True hybrid mix: NVIDIA nemotron-3.5-bolt-e4b for multi-step fast_llm tool loops (avoids Groq TPM 429s)
-# + Groq openai/gpt-oss-120b for single-shot synthesis with instant NVIDIA fallback on 429
+# True NVIDIA-only fast mode: use nvidia/nemotron-3.5-bolt-e4b (0.67s chat, 0.51s tool-calling)
+# unless REPOMIND_PROVIDER=groq is explicitly requested.
 try:
-    if os.getenv("REPOMIND_PROVIDER", "auto").lower() != "nvidia" and GROQ_API_KEY:
+    if os.getenv("REPOMIND_PROVIDER", "nvidia").lower() == "groq" and GROQ_API_KEY:
         nim_fast = create_chat_nvidia(FAST_MODEL, max_tokens=2048, temperature=0.0)
         groq_primary = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0, max_retries=0)
         fast_llm = nim_fast
