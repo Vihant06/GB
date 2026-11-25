@@ -8,7 +8,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class EvidenceItem(BaseModel):
@@ -99,6 +99,8 @@ class EvidenceEvaluation(BaseModel):
 
 class RepoMindState(TypedDict):
     user_query: str
+    chat_history: NotRequired[list[dict]]
+    conversation_context: NotRequired[str]
     actor_id: str
     attempt_count: int
     plan_reasoning: str

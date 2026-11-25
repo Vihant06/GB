@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Literal
 
-from app.config import DB_PATH, RATE_CFG
+from app.config import DB_PATH, RATE_CFG, get_repo_snapshot
 
 _SCHEMA_LOCK = threading.Lock()
 _INITIALIZED_DBS: set[str] = set()
@@ -247,6 +247,7 @@ def record_external_usage_and_check_cap(
 
 def cache_get(cache_key: str, ttl_sec: int, db_path: str | None = None) -> dict | None:
     """Retrieve an item from external_docs_cache if present and not expired."""
+    cache_key = repository_cache_prefix() + cache_key
     init_db(db_path)
     with contextlib.closing(connect_sqlite(db_path)) as conn:
         row = conn.execute(
@@ -279,6 +280,7 @@ def cache_put(
     db_path: str | None = None,
 ) -> None:
     """Store or update a cached document entry."""
+    cache_key = repository_cache_prefix() + cache_key
     init_db(db_path)
     with contextlib.closing(connect_sqlite(db_path)) as conn:
         with conn:
@@ -322,8 +324,16 @@ def _chunk_markdown_by_headings(markdown: str, max_chunk_chars: int = 1200) -> l
     return sections or [("Overview", markdown[:max_chunk_chars])]
 
 
+def repository_cache_prefix() -> str:
+    snapshot = get_repo_snapshot()
+    if snapshot is None:
+        return ""
+    return f"{snapshot.index_key or 'no-repository'}::"
+
+
 def index_markdown_chunks(url: str, markdown: str, db_path: str | None = None) -> int:
     """Replace existing FTS5 chunks for a URL and insert freshly split heading chunks."""
+    url = repository_cache_prefix() + url
     init_db(db_path)
     chunks = _chunk_markdown_by_headings(markdown)
     with contextlib.closing(connect_sqlite(db_path)) as conn:
@@ -343,6 +353,11 @@ def query_doc_chunks_fts(
     db_path: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """Safe BM25/FTS5 query over cached Firecrawl documentation chunks."""
+    prefix = repository_cache_prefix()
+    if prefix:
+        if not urls:
+            return []
+        urls = [prefix + url for url in urls]
     init_db(db_path)
     tokens = [
         t for t in re.findall(r"[a-zA-Z0-9_]{2,}", query)
@@ -379,7 +394,7 @@ def query_doc_chunks_fts(
                 [*urls, limit],
             ).fetchall()
 
-    return rows
+    return [(url.removeprefix(prefix), heading, content) for url, heading, content in rows]
 
 
 def upsert_external_records(records: list[dict], db_path: str | None = None) -> None:
@@ -484,6 +499,11 @@ def query_repo_symbols_fts(
     include_tests: bool = False,
 ) -> list[tuple[str, str]]:
     """Production-first, language-aware BM25/FTS5 lookup of candidate repository files and symbols."""
+    snapshot = get_repo_snapshot()
+    if snapshot is not None:
+        if snapshot.name.lower() != repo_name.lower():
+            return []
+        repo_name = snapshot.index_key
     if not repo_name or not query:
         return []
     init_db(db_path)

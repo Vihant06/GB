@@ -32,6 +32,7 @@ function getAiStatusState(step?: string): 'thinking' | 'researching' | 'analyzin
 }
 
 function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): WebSource[] {
+  if (!repo?.revision) return [];
   const sources: WebSource[] = [];
   const seenIds = new Set<string>();
 
@@ -55,7 +56,7 @@ function getSourcesForMessage(message: ChatMessage, repo?: RepoTarget | null): W
         seenIds.add(citation);
         const lineFragment = startLine ? (endLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`) : '';
         const lineLabel = startLine ? (endLine ? `:L${startLine}-L${endLine}` : `:L${startLine}`) : '';
-        const url = repo ? `${repo.url}/blob/main/${rawPath}${lineFragment}` : `#${rawPath}`;
+        const url = `${repo.url}/blob/${repo.revision}/${rawPath.split('/').map(encodeURIComponent).join('/')}${lineFragment}`;
         sources.push({
           id: `citation-${citation}`,
           title: `${rawPath}${lineLabel}`,
@@ -293,7 +294,7 @@ export function ChatSessionPane({
         ) : (
           session.messages.map((message) => {
             const isUser = message.sender === 'user';
-            const messageRepo = message.repoTarget ?? effectiveRepo;
+            const messageRepo = message.repoTarget;
             const messageSources = !isUser ? getSourcesForMessage(message, messageRepo) : [];
 
             return (

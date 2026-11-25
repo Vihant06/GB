@@ -140,14 +140,16 @@ def safe_repo_path(rel_path: str, repo_root: Path | None = None) -> tuple[Path |
 
     # Reject explicit traversal tokens before resolving
     parts = Path(cleaned).parts
-    if ".." in parts:
+    if ".." in parts or any(part.rstrip(" .").lower() == ".git" for part in parts):
         return None, f"[PATH_TRAVERSAL_BLOCKED] Traversal '..' in '{rel_path}' is blocked."
 
     candidate = (root / cleaned).resolve()
     try:
-        candidate.relative_to(root)
+        resolved_parts = candidate.relative_to(root).parts
     except ValueError:
         return None, f"[PATH_TRAVERSAL_BLOCKED] '{rel_path}' escapes repository root."
+    if any(part.rstrip(" .").lower() == ".git" for part in resolved_parts):
+        return None, "[PATH_TRAVERSAL_BLOCKED] Git metadata is excluded from repository evidence."
 
     return candidate, ""
 

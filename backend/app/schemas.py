@@ -26,6 +26,7 @@ class QueryRequest(BaseModel):
         default_factory=list,
         description="Optional conversation history messages.",
     )
+    repo_revision: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     response_style: Optional[Literal["balanced", "concise", "detailed"]] = Field(
         default="balanced",
         description="Preferred level of response detail.",
@@ -44,7 +45,7 @@ class RepoIndexResponse(BaseModel):
     status: str
     repo_name: str
     repo_url: str
-    repo_path: str
+    repo_revision: str
     python_files_count: int
     docs_files_count: int
     total_files_count: int
@@ -62,6 +63,7 @@ class UsageMetrics(BaseModel):
 
 class QueryResponse(BaseModel):
     query: str
+    repo_revision: Optional[str] = None
     report: str
     trace_logs: List[str]
     usage: UsageMetrics

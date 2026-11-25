@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 import re
 import time
 from typing import AsyncGenerator
@@ -21,7 +22,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.deps import get_actor_identity
 from app.budget import get_current_budget, request_budget_scope
-from app.config import DB_PATH, get_repo_full_name, get_repo_root
+from app.config import BASE_DIR, DB_PATH, RepositorySnapshot, get_repo_full_name, get_repo_root, repository_scope
 from app.database import connect_sqlite, init_db
 from app.graph.nodes import reset_token_callback, set_token_callback
 from app.graph.workflow import repomind_graph
@@ -97,26 +98,25 @@ def _sanitize_log(log: str) -> str:
 
 @router.get("/repo/active")
 async def get_active_repository():
-    """Retrieve metadata about the currently loaded repository."""
+    """Retrieve metadata for the operator-configured default repository."""
     return get_active_repo_info()
 
 
 @router.post("/repo/index", response_model=RepoIndexResponse)
 @router.post("/repo/link", response_model=RepoIndexResponse)
 async def index_repository(request: RepoIndexRequest):
-    """
-    Clone, analyze, and index a new GitHub repository dynamically.
-    Switches the active analysis context without restarting the server.
-    """
+    """Prepare a public GitHub checkout and return its pinned revision."""
     try:
         result = await anyio.to_thread.run_sync(clone_and_index_repo, request.repo_url)
         return RepoIndexResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as e:
-        logger.exception("Failed to clone/index repository %s: %s", request.repo_url, e)
+        logger.warning("Failed to prepare repository: %s", type(e).__name__)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to clone and index repository '{request.repo_url}': {str(e)}",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The requested repository could not be indexed.",
+        ) from e
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -153,9 +153,25 @@ def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
-def _run_graph_sync(initial_state: dict, budget_tracker) -> dict:
+async def _resolve_query_snapshot(request: QueryRequest) -> RepositorySnapshot:
+    target = request.repo_url or get_repo_full_name()
+    if not target:
+        if request.repo_revision:
+            raise HTTPException(status_code=400, detail="A repository is required for a pinned revision.")
+        return RepositorySnapshot("", BASE_DIR / "data" / ".no-repository")
+    try:
+        result = await anyio.to_thread.run_sync(prepare_query_repo, target, request.repo_revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=409 if request.repo_revision else 400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Could not prepare requested repository: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="The requested repository could not be prepared.") from exc
+    return RepositorySnapshot(result["repo_name"], Path(result["repo_path"]), result["repo_revision"])
+
+
+def _run_graph_sync(initial_state: dict, budget_tracker, snapshot: RepositorySnapshot) -> dict:
     """Run LangGraph synchronously inside an isolated thread with propagated budget context."""
-    with request_budget_scope(budget_tracker):
+    with request_budget_scope(budget_tracker), repository_scope(snapshot):
         return repomind_graph.invoke(initial_state)
 
 
@@ -166,15 +182,12 @@ async def execute_query(
     actor_id: str = Depends(get_actor_identity),
 ):
     """Execute a non-streaming query against RepoMind."""
-    if request.repo_url:
-        try:
-            await anyio.to_thread.run_sync(prepare_query_repo, request.repo_url)
-        except Exception as e:
-            logger.warning("Could not dynamically prepare repository %s: %s", request.repo_url, e)
+    snapshot = await _resolve_query_snapshot(request)
 
     with request_budget_scope() as budget:
         initial_state = {
             "user_query": request.query,
+            "chat_history": request.history[-6:],
             "actor_id": actor_id,
             "attempt_count": 0,
             "plan_reasoning": "",
@@ -188,7 +201,7 @@ async def execute_query(
         }
 
         try:
-            result = await anyio.to_thread.run_sync(_run_graph_sync, initial_state, budget)
+            result = await anyio.to_thread.run_sync(_run_graph_sync, initial_state, budget, snapshot)
         except Exception as e:
             logger.exception("Error executing RepoMind query: %s", e)
             raise HTTPException(
@@ -214,6 +227,7 @@ async def execute_query(
 
         return QueryResponse(
             query=request.query,
+            repo_revision=snapshot.revision,
             report=report,
             trace_logs=[_sanitize_log(l) for l in result.get("trace_logs", [])],
             usage=usage,
@@ -230,16 +244,13 @@ async def stream_query(
     """
     Stream query execution traces, node progress, tokens, and final engineering report via SSE.
     """
-    if request.repo_url:
-        try:
-            await anyio.to_thread.run_sync(prepare_query_repo, request.repo_url)
-        except Exception as e:
-            logger.warning("Could not dynamically prepare repository %s: %s", request.repo_url, e)
+    snapshot = await _resolve_query_snapshot(request)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         with request_budget_scope() as budget:
             initial_state = {
                 "user_query": request.query,
+                "chat_history": request.history[-6:],
                 "actor_id": actor_id,
                 "attempt_count": 0,
                 "plan_reasoning": "",
@@ -253,11 +264,11 @@ async def stream_query(
             }
 
             # 1. Initial Status Event
-            current_repo_name = get_repo_full_name()
+            current_repo_name = snapshot.name
             status_msg = f"Analyzing query for repository {current_repo_name}..." if current_repo_name else "Analyzing query..."
             yield _format_sse(
                 "status",
-                {"stage": "init", "message": status_msg, "text": ""},
+                {"stage": "init", "message": status_msg, "text": "", "repo_revision": snapshot.revision},
             )
 
             final_report = ""
@@ -277,8 +288,9 @@ async def stream_query(
 
             async def _produce_graph_events() -> None:
                 try:
-                    async for event in repomind_graph.astream(initial_state, stream_mode="updates"):
-                        await sse_queue.put(("event", event))
+                    with repository_scope(snapshot):
+                        async for event in repomind_graph.astream(initial_state, stream_mode="updates"):
+                            await sse_queue.put(("event", event))
                     await sse_queue.put(("done", None))
                 except Exception as exc:
                     await sse_queue.put(("error", exc))
@@ -384,6 +396,7 @@ async def stream_query(
                         "text": "",
                         "trace_logs": [_sanitize_log(l) for l in collected_logs],
                         "verified_citations": verified_citations,
+                        "repo_revision": snapshot.revision,
                         "usage": usage_dict,
                         "timing_ms": {"total_ms": total_ms, "ttft_ms": ttft_ms},
                         "done": True,

@@ -16,6 +16,7 @@ import {
 } from './types/chat';
 
 const THEME_STORAGE_KEY = 'wayne-chat-theme';
+const BACKEND_ORIGIN = (import.meta.env.VITE_BACKEND_URL ?? '').replace(/\/+$/, '');
 
 const POPULAR_REPOS = [
   {name: 'pallets/flask', desc: 'Lightweight WSGI Python web framework'},
@@ -73,13 +74,14 @@ export default function App() {
   useEffect(() => {
     const fetchActiveRepo = async () => {
       try {
-        const res = await fetch('/repo/active');
+        const res = await fetch(`${BACKEND_ORIGIN}/repo/active`);
         if (res.ok) {
           const data = await res.json();
           if (data && data.repo_name && data.repo_available) {
             const target: RepoTarget = {
               name: data.repo_name,
               url: data.repo_url || `https://github.com/${data.repo_name}`,
+              revision: data.repo_revision ?? undefined,
               filesCount: data.total_files_count || data.python_files_count || 0,
               pythonFilesCount: data.python_files_count || 0,
               docsFilesCount: data.docs_files_count || 0,
@@ -100,7 +102,7 @@ export default function App() {
     setIsIndexingRepo(true);
     setModalRepoError(null);
     try {
-      const res = await fetch('/repo/index', {
+      const res = await fetch(`${BACKEND_ORIGIN}/repo/index`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({repo_url: repoUrl}),
@@ -120,6 +122,7 @@ export default function App() {
       const target: RepoTarget = {
         name: data.repo_name,
         url: data.repo_url,
+        revision: data.repo_revision,
         filesCount: data.total_files_count,
         pythonFilesCount: data.python_files_count,
         docsFilesCount: data.docs_files_count,
@@ -159,12 +162,17 @@ export default function App() {
     setIsTyping(true);
 
     const historyPayload = historyMessages
-      .filter((m) => !m.isError && m.text)
+      .filter((m, index, messages) => {
+        if (m.isError || m.isStreaming || !m.text) return false;
+        // Older user turns may lack a repository tag. Their immediate reply supplies the scope.
+        const repo = m.repoTarget ?? (m.sender === 'user' && messages[index + 1]?.sender === 'contact'
+          ? messages[index + 1].repoTarget : undefined);
+        return repo?.url === activeRepo?.url && repo?.revision === activeRepo?.revision;
+      })
+      .slice(-6)
       .map((m) => ({
         role: m.sender === 'user' ? ('user' as const) : ('model' as const),
-        text: m.attachment?.content
-          ? `${m.text}\n\n[Attached File: ${m.attachment.fileName}]\n${m.attachment.content}`
-          : (m.text ?? ''),
+        text: (m.text ?? '').slice(0, 650),
       }));
 
     const botMsgId = `gemini-reply-${Date.now()}`;
@@ -172,9 +180,7 @@ export default function App() {
     let botMessageAdded = false;
 
     try {
-      const backendUrl = import.meta.env.VITE_BACKEND_URL
-        ? `${import.meta.env.VITE_BACKEND_URL}/query/stream`
-        : '/query/stream';
+      const backendUrl = `${BACKEND_ORIGIN}/query/stream`;
 
       const response = await fetch(backendUrl, {
         method: 'POST',
@@ -182,6 +188,7 @@ export default function App() {
         body: JSON.stringify({
           query: promptText,
           repo_url: activeRepo?.url,
+          repo_revision: activeRepo?.revision,
           history: historyPayload,
           response_style: responseStyle,
         }),
@@ -246,6 +253,7 @@ export default function App() {
             stage?: string;
             trace_logs?: string[];
             verified_citations?: string[];
+            repo_revision?: string;
             error?: string;
             done?: boolean;
           } = {};
@@ -345,6 +353,9 @@ export default function App() {
                       progressStep: undefined,
                       traceLogs: payload.trace_logs,
                       verifiedCitations: payload.verified_citations,
+                      repoTarget: activeRepo && payload.repo_revision
+                        ? {...activeRepo, revision: payload.repo_revision}
+                        : m.repoTarget,
                     }
                   : m
               ),
@@ -401,6 +412,7 @@ export default function App() {
       senderLabel: 'You',
       timestamp: formatCurrentTime(),
       text,
+      repoTarget: activeRepo ?? undefined,
       attachment: attachment
         ? {
             id: `att-${Date.now()}`,

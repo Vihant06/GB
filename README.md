@@ -141,12 +141,12 @@ uv pip install -r requirements.txt
 
 Start the FastAPI backend with Uvicorn:
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-The backend is now available at `http://localhost:8000`.
-- Swagger Docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
+The backend is now available at `http://localhost:8001`.
+- Swagger Docs: `http://localhost:8001/docs`
+- Health check: `http://localhost:8001/health`
 
 ### 4. Frontend Startup
 
@@ -157,7 +157,15 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser. The Vite development server automatically proxies `/query`, `/query/stream`, and `/health` requests to `http://localhost:8000`.
+Open `http://localhost:3000` in your browser. The development server proxies API requests to `http://localhost:8001`.
+
+### Separate frontend and backend hosting
+
+- **Frontend:** Build from `frontend/` with `npm ci` and `npm run build`. Publish `dist/` as a static site. Set `VITE_BACKEND_URL` to the backend HTTPS origin at build time. Keep provider keys on the backend.
+- **Backend:** Install Git and `backend/requirements.txt`. From `backend/`, run `uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001} --workers 1` on a POSIX host. Set the model provider key and `REPOMIND_CORS_ORIGINS` to the exact frontend origin. The host must support HTTP streaming and writable local disk.
+- **Cache:** SQLite and shallow public GitHub checkouts use backend-local storage. Set `REPOMIND_DB_PATH` and `REPOMIND_REPOSITORY_DIR` to use a specific writable directory. The default cache allows eight repositories, configurable with `REPOMIND_MAX_CACHED_REPOS`. This is a repository count limit. No database service or persistent volume is required for the cache. On an empty cache, the backend can fetch a pinned commit again if GitHub still serves it.
+
+Linking a repo returns its commit SHA. The client sends that SHA with each query and uses it in source links. The single-worker backend keeps one checkout per repo. If that checkout holds a different SHA, the query fails with a conflict instead of changing revisions.
 
 ---
 

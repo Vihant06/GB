@@ -1,9 +1,5 @@
 """
-RepoMind Dynamic Repository Manager.
-Allows users to provide any GitHub repository URL on the fly,
-clones/updates it into data/repositories, indexes its files and AST symbols,
-and switches the active analysis context without requiring server restarts.
-Handles Git LFS repositories by safely skipping gigabyte model weights.
+Prepare pinned public GitHub checkouts and local SQLite symbol indexes.
 """
 
 from __future__ import annotations
@@ -13,173 +9,104 @@ import logging
 import os
 from pathlib import Path
 import re
-import shutil
-import stat
+import subprocess
 import urllib.parse
-from typing import Any, Dict, Optional, Tuple
+from tempfile import TemporaryDirectory
+from threading import Lock
+from typing import Any, Dict, Tuple
 
 from git import Repo
 
 from app.config import (
     BASE_DIR,
-    GITHUB_TOKEN,
     IGNORED_DIRS,
     get_repo_full_name,
-    get_repo_root,
-    set_active_repo,
 )
 from app.database import _classify_repo_file, _extract_doc_lang, index_repo_symbols
-from app.tools.github_sync import sync_github_issues
-
-# Ensure Git LFS smudge is skipped globally to prevent downloading large model binaries
-os.environ["GIT_LFS_SKIP_SMUDGE"] = "1"
 
 logger = logging.getLogger("repomind.repo_manager")
-_ready_indexes: dict[tuple[str, Path], tuple[str, Dict[str, Any]]] = {}
-
-
-def prepare_query_repo(repo_url_or_slug: str) -> Dict[str, Any]:
-    """Reuse an index built by this process for the current clean checkout."""
-    owner, name, _ = parse_github_url(repo_url_or_slug)
-    path = BASE_DIR / "data" / "repositories" / f"{owner}_{name}"
-    full_name = f"{owner}/{name}"
-    cached = _ready_indexes.get((full_name, path))
-    if cached and (path / ".git").exists():
-        with Repo(path) as repo:
-            if repo.head.commit.hexsha == cached[0] and not repo.is_dirty(untracked_files=True):
-                set_active_repo(full_name, path)
-                return dict(cached[1])
-    return clone_and_index_repo(repo_url_or_slug)
-
-
-def _remove_readonly(func, path, excinfo):
-    """Windows-safe helper for deleting read-only git objects."""
-    try:
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-    except Exception:
-        pass
-
-
-def _clean_dir(path: Path):
-    """Safely and completely delete a directory on Windows/POSIX."""
-    if path.exists():
-        shutil.rmtree(path, onerror=_remove_readonly)
+_ready_indexes: dict[Path, Dict[str, Any]] = {}
+_index_lock = Lock()
+_cache_root = Path(os.getenv(
+    "REPOMIND_REPOSITORY_DIR", str(BASE_DIR / "data" / "repositories" / "managed")
+)).resolve()
 
 
 def parse_github_url(url_or_slug: str) -> Tuple[str, str, str]:
-    """
-    Parse a GitHub repository URL or slug into (owner, repo_name, canonical_url).
-    Examples:
-    - https://github.com/psf/requests -> ('psf', 'requests', 'https://github.com/psf/requests')
-    - git@github.com:pallets/flask.git -> ('pallets', 'flask', 'https://github.com/pallets/flask')
-    - fastapi/fastapi -> ('fastapi', 'fastapi', 'https://github.com/fastapi/fastapi')
-    """
-    cleaned = url_or_slug.strip().rstrip("/")
-    if cleaned.endswith(".git"):
-        cleaned = cleaned[:-4]
+    """Accept a GitHub repository URL or owner/repository slug."""
+    value = url_or_slug.strip().rstrip("/")
+    if value.startswith("git@github.com:"):
+        value = value.removeprefix("git@github.com:")
+    if "://" in value:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme != "https" or parsed.netloc.lower() != "github.com" or parsed.query or parsed.fragment:
+            raise ValueError("Expected a GitHub repository URL.")
+        value = parsed.path.removeprefix("/")
+    match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9_.-]{1,100})", value.removesuffix(".git"))
+    if not match or match[2] in (".", "..") or match[2].endswith("."):
+        raise ValueError("Expected a GitHub owner/repository slug.")
+    owner, name = match.groups()
+    return owner, name, f"https://github.com/{owner}/{name}"
 
-    # Handle SSH format: git@github.com:owner/repo
-    if cleaned.startswith("git@github.com:"):
-        path_part = cleaned.split("git@github.com:", 1)[1]
-    elif "github.com/" in cleaned:
-        path_part = cleaned.split("github.com/", 1)[1]
-    else:
-        path_part = cleaned
 
-    parts = [p for p in path_part.split("/") if p]
-    if len(parts) >= 2:
-        owner = parts[-2]
-        repo = parts[-1]
-    elif len(parts) == 1:
-        owner = "user"
-        repo = parts[0]
-    else:
-        raise ValueError(f"Invalid GitHub repository identifier: '{url_or_slug}'")
+def prepare_query_repo(repo_url_or_slug: str, revision: str | None = None) -> Dict[str, Any]:
+    """Resolve a clean checkout and matching SQLite index without switching global state."""
+    if revision is not None and not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise ValueError("Expected a full Git commit SHA.")
+    owner, name, canonical_url = parse_github_url(repo_url_or_slug)
+    full_name = f"{owner}/{name}"
+    # One cached checkout per repo. Rebuild the requested commit after an ephemeral disk reset.
+    target_dir = _cache_root / owner.lower() / name.lower()
 
-    canonical_url = f"https://github.com/{owner}/{repo}"
-    return owner, repo, canonical_url
+    with _index_lock:
+        if not target_dir.exists():
+            max_repos = max(1, int(os.getenv("REPOMIND_MAX_CACHED_REPOS", "8")))
+            cached_repos = sum(1 for directory in _cache_root.glob("*/*/.git") if directory.is_dir())
+            if cached_repos >= max_repos:
+                raise ValueError("The repository cache is full. Ask the operator to free space.")
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(prefix="clone-", dir=target_dir.parent) as staging:
+                checkout = Path(staging) / "checkout"
+                with Repo.init(checkout, mkdir=True) as repo:
+                    env = {**os.environ, "GIT_LFS_SKIP_SMUDGE": "1", "GIT_TERMINAL_PROMPT": "0"}
+                    subprocess.run(
+                        ["git", "-c", "credential.helper=", "fetch", "--depth=1", "--no-tags",
+                         canonical_url + ".git", revision or "HEAD"],
+                        cwd=checkout, env=env, check=True, capture_output=True, timeout=45,
+                    )
+                    with repo.git.custom_environment(GIT_LFS_SKIP_SMUDGE="1", GIT_TERMINAL_PROMPT="0"):
+                        repo.git.checkout("--detach", "FETCH_HEAD")
+                    if revision and repo.head.commit.hexsha != revision:
+                        raise ValueError("GitHub did not return the requested revision.")
+                checkout.rename(target_dir)
+
+        with Repo(target_dir, search_parent_directories=False) as repo:
+            actual = repo.head.commit.hexsha
+            if revision and actual != revision:
+                raise ValueError("The requested revision is not available in this checkout.")
+            if repo.is_dirty(untracked_files=True):
+                raise ValueError("The cached checkout has local changes. Use a clean checkout.")
+
+        cached = _ready_indexes.get(target_dir)
+        if cached and cached["repo_revision"] == actual:
+            return dict(cached)
+        result = _index_checkout(full_name, canonical_url, target_dir, actual)
+        _ready_indexes[target_dir] = result
+        return dict(result)
 
 
 def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
-    """
-    Clone or update a repository, inspect its files, and set it as the active RepoMind target.
-    Safely skips binary Git LFS assets to focus on code and documentation.
-    """
-    owner, repo_name, canonical_url = parse_github_url(repo_url_or_slug)
-    full_name = f"{owner}/{repo_name}"
+    return prepare_query_repo(repo_url_or_slug)
 
-    target_dir = BASE_DIR / "data" / "repositories" / f"{owner}_{repo_name}"
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Setting up repository: %s at %s", full_name, target_dir)
-
-    # 1. Inspect existing directory and repair if needed
-    if (target_dir / ".git").exists():
-        try:
-            repo = Repo(str(target_dir))
-            # If working tree has unstaged deletions from prior smudge failure, restore it
-            if repo.is_dirty(untracked_files=False):
-                logger.info("Resetting working tree for %s...", full_name)
-                repo.git.reset("--hard", "HEAD")
-        except Exception as e:
-            logger.warning("Existing git directory %s is damaged (%s). Re-cloning...", target_dir, e)
-            _clean_dir(target_dir)
-
-    # 2. Clone if not present
-    if not (target_dir / ".git").exists():
-        _clean_dir(target_dir)
-
-        env = os.environ.copy()
-        env["GIT_LFS_SKIP_SMUDGE"] = "1"
-
-        clone_candidates = []
-        if GITHUB_TOKEN:
-            parsed = urllib.parse.urlparse(canonical_url + ".git")
-            auth_url = f"https://x-access-token:{GITHUB_TOKEN}@{parsed.netloc}{parsed.path}"
-            clone_candidates.append(auth_url)
-        clone_candidates.append(canonical_url + ".git")
-
-        success = False
-        last_err = None
-
-        for candidate_url in clone_candidates:
-            try:
-                logger.info("Cloning %s into %s (depth=1, skipping LFS binaries)...", full_name, target_dir)
-                Repo.clone_from(
-                    candidate_url,
-                    str(target_dir),
-                    depth=1,
-                    multi_options=["-c filter.lfs.smudge=", "-c filter.lfs.required=false"],
-                    allow_unsafe_options=True,
-                    env=env,
-                )
-                success = True
-                logger.info("Successfully cloned %s.", full_name)
-                break
-            except Exception as e:
-                last_err = e
-                _clean_dir(target_dir)
-                continue
-
-        if not success:
-            err_msg = str(last_err)
-            if GITHUB_TOKEN:
-                err_msg = err_msg.replace(GITHUB_TOKEN, "[REDACTED_TOKEN]")
-            logger.error("Failed to clone repository %s: %s", full_name, err_msg)
-            raise RuntimeError(f"Could not clone repository '{full_name}': {err_msg}")
-
-    # 3. Set as active repository in config
-    set_active_repo(full_name, target_dir)
-
-    # 4. Analyze repository files and structure
+def _index_checkout(full_name: str, canonical_url: str, target_dir: Path, revision: str) -> Dict[str, Any]:
     py_files = []
     code_files = []
     doc_files = []
     total_files = 0
 
     for p in target_dir.rglob("*"):
-        if p.is_file() and not any(part in IGNORED_DIRS for part in p.parts):
+        if not p.is_symlink() and p.is_file() and not any(part in IGNORED_DIRS for part in p.parts):
             total_files += 1
             rel_str = str(p.relative_to(target_dir)).replace("\\", "/")
             if p.suffix == ".py":
@@ -211,7 +138,7 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
     fts_entries: list[tuple[str, str]] = []
     for rel_str in ordered_files:
         fpath = target_dir / rel_str
-        if not fpath.is_file():
+        if fpath.is_symlink() or not fpath.is_file() or fpath.stat().st_size > 512_000:
             continue
         if rel_str.endswith(".py"):
             try:
@@ -238,22 +165,7 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
             except Exception:
                 fts_entries.append((rel_str, rel_str))
 
-    indexed_revision = None
-    try:
-        with Repo(target_dir) as indexed_repo:
-            if not indexed_repo.is_dirty(untracked_files=True):
-                indexed_revision = indexed_repo.head.commit.hexsha
-        index_repo_symbols(full_name, fts_entries)
-    except Exception as e:
-        indexed_revision = None
-        logger.debug("FTS5 repo symbol indexing skipped: %s", e)
-
-    # Optional initial issue sync if token configured
-    if GITHUB_TOKEN:
-        try:
-            sync_github_issues(repo_full_name=full_name, max_issues=10)
-        except Exception as e:
-            logger.debug("Optional GitHub sync on indexing failed: %s", e)
+    index_repo_symbols(f"{full_name.lower()}@{revision}", fts_entries)
 
     effective_code_count = len(py_files) if py_files else len(code_files)
 
@@ -262,60 +174,24 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
         "repo_name": full_name,
         "repo_url": canonical_url,
         "repo_path": str(target_dir),
+        "repo_revision": revision,
         "python_files_count": effective_code_count,
         "docs_files_count": len(doc_files),
         "total_files_count": total_files,
         "sample_files": (py_files or code_files)[:10],
         "manifests": manifests,
     }
-    if indexed_revision:
-        _ready_indexes[(full_name, target_dir)] = (indexed_revision, result)
-    else:
-        _ready_indexes.pop((full_name, target_dir), None)
     return result
 
 
 def get_active_repo_info() -> Dict[str, Any]:
-    """Retrieve metadata about the currently active repository."""
-    full_name = get_repo_full_name()
-    root_path = get_repo_root()
-    if not full_name or root_path is None or not root_path.exists():
-        return {
-            "repo_name": "",
-            "repo_url": "",
-            "repo_path": "",
-            "repo_available": False,
-            "python_files_count": 0,
-            "docs_files_count": 0,
-            "total_files_count": 0,
-        }
-
-    canonical_url = f"https://github.com/{full_name}"
-    exists = root_path.exists()
-    py_files_count = 0
-    code_files_count = 0
-    docs_files_count = 0
-    total_files = 0
-    if exists:
-        for p in root_path.rglob("*"):
-            if p.is_file() and not any(part in IGNORED_DIRS for part in p.parts):
-                total_files += 1
-                if p.suffix == ".py":
-                    py_files_count += 1
-                    code_files_count += 1
-                elif p.suffix in (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"):
-                    code_files_count += 1
-                elif p.suffix in (".md", ".rst", ".txt"):
-                    docs_files_count += 1
-
-    effective_code = py_files_count if py_files_count else code_files_count
-
-    return {
-        "repo_name": full_name,
-        "repo_url": canonical_url,
-        "repo_path": str(root_path),
-        "repo_available": exists,
-        "python_files_count": effective_code,
-        "docs_files_count": docs_files_count,
-        "total_files_count": total_files,
-    }
+    """Return metadata only for an operator-configured default, not another chat's repo."""
+    configured = get_repo_full_name()
+    if configured:
+        owner, name, url = parse_github_url(configured)
+        root = _cache_root / owner.lower() / name.lower()
+        cached = _ready_indexes.get(root)
+        if cached and (root / ".git").is_dir():
+            return {**{key: value for key, value in cached.items() if key != "repo_path"}, "repo_available": True}
+        return {"repo_name": configured, "repo_url": url, "repo_available": False}
+    return {"repo_name": "", "repo_url": "", "repo_available": False}

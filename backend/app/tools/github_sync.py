@@ -15,7 +15,7 @@ from typing import Any
 from langchain_core.tools import tool
 import requests
 
-from app.config import EXT_CONFIG, GITHUB_TOKEN, REPO_FULL_NAME, get_repo_full_name
+from app.config import EXT_CONFIG, GITHUB_TOKEN, get_repo_full_name
 from app.database import connect_sqlite, upsert_external_records
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def sync_github_issues(
             continue
         body = (issue.get("body") or "No description provided.")[:2500]
         records.append({
-            "id": f"GH-{issue['number']}",
+            "id": f"{target_repo.lower()}::GH-{issue['number']}",
             "source": "GITHUB_ISSUE",
             "status": issue.get("state", "open").upper(),
             "title": issue.get("title", ""),
@@ -127,7 +127,7 @@ def sync_github_ci_failures(
             logger.debug("Failed fetching job details for run %s: %s", run_id, e)
 
         records.append({
-            "id": run_id,
+            "id": f"{target_repo.lower()}::{run_id}",
             "source": "CI_LOG",
             "status": (run.get("conclusion") or "FAILED").upper(),
             "title": f"{run.get('name')} (branch: {run.get('head_branch')}, sha: {run.get('head_sha', '')[:7]})",
@@ -142,10 +142,11 @@ def sync_github_ci_failures(
 @tool
 def search_github_issues_and_ci(query: str) -> str:
     """Search synced GitHub Issues and GitHub Actions CI failure records stored in SQLite."""
+    repo_name = get_repo_full_name()
+    if not repo_name:
+        return "Select a repository to search its issues and CI runs."
     with contextlib.closing(connect_sqlite()) as conn:
-        rows = conn.execute(
-            "SELECT source, external_id, status, title, details FROM external_issues"
-        ).fetchall()
+        rows = repository_github_records(conn, repo_name)
 
     if not rows:
         return "No GitHub Issues or CI failures synced in SQLite."
@@ -165,3 +166,14 @@ def search_github_issues_and_ci(query: str) -> str:
         for source, ext_id, status, title, details in selected
     ]
     return "\n\n---\n\n".join(blocks)
+
+
+def repository_github_records(conn, repo_name: str) -> list[tuple[str, str, str, str, str]]:
+    if not repo_name:
+        return []
+    prefix = f"{repo_name.lower()}::"
+    return conn.execute(
+        "SELECT source, substr(external_id, ?), status, title, details "
+        "FROM external_issues WHERE substr(external_id, 1, ?) = ?",
+        (len(prefix) + 1, len(prefix), prefix),
+    ).fetchall()

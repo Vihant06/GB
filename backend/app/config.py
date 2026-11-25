@@ -7,6 +7,8 @@ model settings, rate limits, and external service configurations.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from dataclasses import dataclass
 from dotenv import find_dotenv, load_dotenv
@@ -67,12 +69,46 @@ _ACTIVE_REPO = {
     "path": _initial_path,
 }
 
+@dataclass(frozen=True)
+class RepositorySnapshot:
+    name: str
+    root: Path
+    revision: str | None = None
+
+    @property
+    def index_key(self) -> str:
+        return f"{self.name.lower()}@{self.revision}" if self.revision else self.name
+
+
+_REPOSITORY_SNAPSHOT: ContextVar[RepositorySnapshot | None] = ContextVar(
+    "repository_snapshot", default=None
+)
+
+
+@contextmanager
+def repository_scope(snapshot: RepositorySnapshot):
+    token = _REPOSITORY_SNAPSHOT.set(snapshot)
+    try:
+        yield snapshot
+    finally:
+        _REPOSITORY_SNAPSHOT.reset(token)
+
+
+def get_repo_snapshot() -> RepositorySnapshot | None:
+    return _REPOSITORY_SNAPSHOT.get()
+
 
 def get_repo_full_name() -> str:
+    snapshot = get_repo_snapshot()
+    if snapshot is not None:
+        return snapshot.name
     return _ACTIVE_REPO.get("full_name", "")
 
 
 def get_repo_root() -> Path:
+    snapshot = get_repo_snapshot()
+    if snapshot is not None:
+        return snapshot.root
     return _ACTIVE_REPO.get("path") or _default_repo_path
 
 

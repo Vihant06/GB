@@ -100,6 +100,7 @@ async function startServer() {
         body: JSON.stringify({
           query: queryText,
           repo_url: (body as any).repo_url,
+          repo_revision: (body as any).repo_revision,
           history: body.history || [],
           response_style: body.response_style || body.responseStyle || 'balanced',
         }),

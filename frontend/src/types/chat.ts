@@ -29,6 +29,7 @@ export interface ChatMessage {
 export interface RepoTarget {
   name: string;
   url: string;
+  revision?: string;
   filesCount?: number;
   pythonFilesCount?: number;
   docsFilesCount?: number;
