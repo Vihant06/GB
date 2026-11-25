@@ -372,17 +372,152 @@ def _ast_extract_symbol_evidence(sub_query: str, user_query: str) -> list[dict]:
     return evidence[:6]
 
 
+def _is_lifecycle_query(query: str) -> bool:
+    """Detect multi-stage execution-flow or lifecycle questions that span multiple files."""
+    ql = query.lower()
+    lifecycle_signals = (
+        "trace",
+        "lifecycle",
+        "from ",
+        "through ",
+        "interact",
+        "propagate",
+        "when cleanup",
+        "end-to-end",
+        "entry point",
+        "request flow",
+        "teardown",
+        "validation",
+    )
+    hits = sum(1 for sig in lifecycle_signals if sig in ql)
+    return hits >= 2 or ("trace" in ql and ("through" in ql or "from" in ql)) or ("lifecycle" in ql)
+
+
+def _extract_query_stages(query: str) -> list[str]:
+    """Split a multi-stage query into distinct stage phrases for multi-file FTS5 discovery."""
+    # Split on common stage delimiters (commas, 'through', 'into', 'and', 'then')
+    parts = re.split(r"[,.;]|\b(?:through|into|then|including|and)\b", query, flags=re.IGNORECASE)
+    stages = [p.strip() for p in parts if len(re.findall(r"[A-Za-z0-9_]{3,}", p)) >= 2]
+    return stages[:6]
+
+
+def _gather_lifecycle_candidates(repo_name: str, query: str, include_tests: bool = False) -> list[str]:
+    """Discover 2-4 distinct production candidate files across stages + 1-hop AST imports/calls."""
+    if not repo_name:
+        return []
+    seen: list[str] = []
+    # 1. Stage-decomposed FTS5 queries so later stages (e.g. routing, dependencies, error handling) surface
+    for stage_q in [query] + _extract_query_stages(query):
+        try:
+            hits = query_repo_symbols_fts(
+                repo_name, stage_q, limit=4, include_tests=include_tests
+            )
+            for fp, _ in hits:
+                if fp not in seen:
+                    seen.append(fp)
+        except Exception:
+            pass
+
+    # 2. 1-hop AST import following from top production candidate file(s)
+    prod_candidates = [fp for fp in seen if fp.endswith(".py") and "/tests/" not in f"/{fp}"][:2]
+    query_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9_]{3,}", query)}
+    for fp in prod_candidates:
+        p, err = safe_repo_path(fp)
+        if err or p is None or not p.is_file():
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module:
+                mod_path = node.module.lstrip(".").replace(".", "/")
+                imported_names = {a.name.lower() for a in node.names}
+                # Check if imported module or names relate to query terms
+                if (imported_names & query_terms) or any(t in mod_path.lower() for t in query_terms):
+                    for candidate in (f"{mod_path}.py", f"src/{mod_path}.py", f"{mod_path}/utils.py"):
+                        cp, cerr = safe_repo_path(candidate)
+                        if not cerr and cp is not None and cp.is_file() and candidate not in seen:
+                            seen.append(candidate)
+    return seen[:8]
+
+
+def _extract_focused_ast_spans(rel_paths: list[str], query: str, max_items: int = 8) -> list[dict]:
+    """Extract focused (<=65-line) AST function/method spans matching query terms across distinct files."""
+    stop = {"the", "and", "for", "with", "that", "from", "into", "when", "how", "where", "are", "does", "what", "cite"}
+    q_terms = {t.lower() for t in re.findall(r"[a-zA-Z0-9_]{3,}", query)} - stop
+    scored_spans: list[tuple[int, str, dict]] = []
+
+    for fp in rel_paths:
+        if not fp.endswith(".py"):
+            continue
+        p, err = safe_repo_path(fp)
+        if err or p is None or not p.is_file():
+            continue
+        source = p.read_text(encoding="utf-8", errors="ignore")
+        lines = source.splitlines()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                end_ln = getattr(node, "end_lineno", node.lineno)
+                if end_ln - node.lineno > 140:
+                    end_ln = min(end_ln, node.lineno + 65)
+                snippet = "\n".join(lines[node.lineno - 1 : end_ln])
+                haystack = f"{node.name} {snippet}".lower()
+                score = sum(3 if t in node.name.lower() else 1 for t in q_terms if t in haystack)
+                if score > 0:
+                    scored_spans.append((
+                        score,
+                        fp,
+                        {
+                            "specialist": "repository_intelligence",
+                            "file_path": fp,
+                            "start_line": node.lineno,
+                            "end_line": min(len(lines), end_ln),
+                            "claim": f"`{node.name}` ({fp}:L{node.lineno}-L{min(len(lines), end_ln)}):\n```python\n{snippet[:1400]}\n```",
+                        },
+                    ))
+
+    scored_spans.sort(key=lambda x: -x[0])
+    # Pick top spans while ensuring multi-file diversity (at most 3 spans per file)
+    selected: list[dict] = []
+    per_file: dict[str, int] = {}
+    for _, fp, item in scored_spans:
+        if per_file.get(fp, 0) >= 3:
+            continue
+        per_file[fp] = per_file.get(fp, 0) + 1
+        selected.append(item)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
 def _run_specialist(agent_graph, specialist_label: str, sub_query: str) -> dict:
     result = agent_graph.invoke({
         "messages": [HumanMessage(content=sub_query)],
         "tool_steps": 0,
         "report": None,
     })
+    # Collect files actually inspected during tool calls
+    inspected_files: list[str] = []
+    for m in result.get("messages", []):
+        for tc in getattr(m, "tool_calls", []) or []:
+            args = tc.get("args", {}) or {}
+            fp = args.get("file_path") or args.get("subpath")
+            if isinstance(fp, str) and fp and fp not in inspected_files:
+                inspected_files.append(fp)
+
     report = result.get("report")
     if not report:
         return {
             "evidence": [],
-            "trace_logs": [f"[{specialist_label}] Returned no structured report."],
+            "trace_logs": [
+                f"[{specialist_label}] Returned no structured report (files_inspected={inspected_files})."
+            ],
         }
 
     items = [
@@ -395,18 +530,21 @@ def _run_specialist(agent_graph, specialist_label: str, sub_query: str) -> dict:
         }
         for item in report.evidence
     ]
+    cited_files = list(dict.fromkeys(i["file_path"] for i in items))
     return {
         "evidence": items,
-        "trace_logs": [f"[{specialist_label}] Collected {len(items)} cited items for: '{sub_query}'"],
+        "trace_logs": [
+            f"[{specialist_label}] Collected {len(items)} cited items | files_inspected={inspected_files or cited_files}"
+        ],
     }
 
 
 def run_repo_intel(state: dict):
-    """Use instant AST extraction when query names an exact file + symbol; otherwise run full specialist."""
+    """Use AST fast path for narrow symbol queries; multi-file lifecycle retrieval for flow questions."""
     sub_query = state.get("sub_query", "")
     user_query = state.get("user_query", "")
 
-    if not _is_deep_query(user_query):
+    if not _is_deep_query(user_query) and not _is_lifecycle_query(user_query):
         direct_hits = _ast_extract_symbol_evidence(sub_query, user_query)
         if direct_hits:
             return {
@@ -416,7 +554,22 @@ def run_repo_intel(state: dict):
                 ],
             }
 
-    return _run_specialist(repo_intel_agent, "repository_intelligence", sub_query)
+    res = _run_specialist(repo_intel_agent, "repository_intelligence", sub_query)
+    if _is_lifecycle_query(user_query):
+        existing_files = {e["file_path"] for e in res.get("evidence", [])}
+        # If specialist stopped early on <=1 production file, supplement with focused AST spans across candidate files
+        if len(existing_files) < 2:
+            curr_repo = get_repo_full_name()
+            cands = _gather_lifecycle_candidates(curr_repo, user_query, include_tests=False)
+            missing_cands = [fp for fp in cands if fp not in existing_files]
+            extra_spans = _extract_focused_ast_spans(missing_cands, user_query, max_items=6)
+            if extra_spans:
+                res["evidence"] = (res.get("evidence", []) + extra_spans)[:10]
+                extra_files = list(dict.fromkeys(e["file_path"] for e in extra_spans))
+                res["trace_logs"].append(
+                    f"[repository_intelligence | Lifecycle Path] Supplemented with focused spans from {extra_files}"
+                )
+    return res
 
 
 def run_debugging(state: dict):
@@ -454,16 +607,26 @@ def orchestrator_plan_node(state: RepoMindState):
 
     context_msg = f"Developer Query: {state['user_query']}\nActive Repository: {curr_repo}\nAttempt: {attempt}/2"
     fts_hint = ""
+    candidate_files: list[str] = []
     if attempt == 1 and curr_repo:
         try:
-            wants_tests = "test" in state["user_query"].lower()
-            fts_hits = query_repo_symbols_fts(
-                curr_repo, state["user_query"], limit=8, include_tests=wants_tests
-            )
-            if fts_hits:
-                hit_lines = [f"- {fp}: {sym[:180]}" for fp, sym in fts_hits]
-                fts_hint = "\n".join(hit_lines)
-                context_msg += "\n\nTop Indexed Candidate Files & Symbols (FTS5):\n" + fts_hint
+            wants_tests = bool(re.search(r"\btests?\b", state["user_query"].lower()))
+            if _is_lifecycle_query(state["user_query"]):
+                candidate_files = _gather_lifecycle_candidates(
+                    curr_repo, state["user_query"], include_tests=wants_tests
+                )
+                if candidate_files:
+                    fts_hint = "\n".join(f"- {fp}" for fp in candidate_files)
+                    context_msg += "\n\nStage-Decomposed Candidate Files (inspect 2-3 distinct production files):\n" + fts_hint
+            else:
+                fts_hits = query_repo_symbols_fts(
+                    curr_repo, state["user_query"], limit=8, include_tests=wants_tests
+                )
+                if fts_hits:
+                    candidate_files = [fp for fp, _ in fts_hits]
+                    hit_lines = [f"- {fp}: {sym[:180]}" for fp, sym in fts_hits]
+                    fts_hint = "\n".join(hit_lines)
+                    context_msg += "\n\nTop Indexed Candidate Files & Symbols (FTS5):\n" + fts_hint
         except Exception:
             pass
     if prior_evidence:
@@ -508,18 +671,39 @@ def orchestrator_plan_node(state: RepoMindState):
             }
         ]
 
+    # Enforce smallest useful specialist set on Attempt 1 for implementation/lifecycle queries
+    if attempt == 1:
+        q_low = state["user_query"].lower()
+        wants_tests = bool(re.search(r"\btests?\b", q_low))
+        wants_debug = any(k in q_low for k in ("bug", "error log", "traceback", "github issue", "ci fail", "exa", "stack trace"))
+        wants_impact = any(k in q_low for k in ("blast radius", "change impact", "callers of", "importers of"))
+        if not wants_debug and not wants_impact:
+            allowed_specs = {"repository_intelligence"}
+            if wants_tests:
+                allowed_specs.add("test_intelligence")
+            filtered = [t for t in serialized_tasks if t.get("specialist") in allowed_specs]
+            if filtered:
+                serialized_tasks = filtered
+            if wants_tests and not any(t.get("specialist") == "test_intelligence" for t in serialized_tasks):
+                serialized_tasks.append({
+                    "specialist": "test_intelligence",
+                    "sub_query": f"Find relevant tests verifying: {state['user_query'][:200]}",
+                })
+
     # Inject FTS5 candidate files directly into repository_intelligence sub_query to avoid cold search steps
     if fts_hint:
         for t in serialized_tasks:
             if t.get("specialist") == "repository_intelligence":
-                t["sub_query"] = f"{t['sub_query']}\n\nCandidate files from FTS5 index (inspect these first):\n{fts_hint}"
+                t["sub_query"] = f"{t['sub_query']}\n\nCandidate files from FTS5 index (inspect 2-3 distinct files):\n{fts_hint}"
 
     chosen = [t["specialist"] for t in serialized_tasks]
     return {
         "attempt_count": attempt,
         "plan_reasoning": plan.reasoning,
         "tasks": serialized_tasks,
-        "trace_logs": [f"[Orchestrator Plan | Attempt {attempt}] Routed to {chosen}: {plan.reasoning}"],
+        "trace_logs": [
+            f"[Orchestrator Plan | Attempt {attempt}] Routed to {chosen}: {plan.reasoning} | candidate_files={candidate_files}"
+        ],
     }
 
 
@@ -560,7 +744,7 @@ def orchestrator_review_node(state: RepoMindState):
         return {
             "is_sufficient": False,
             "missing_info_feedback": msg,
-            "trace_logs": [f"[Orchestrator Review | Attempt {state['attempt_count']}] Sufficient=False | Note: {msg}"],
+            "trace_logs": [f"[Orchestrator Review | Attempt {state['attempt_count']}] Escalating to Attempt 2: {msg}"],
         }
 
     # Fast-path approval on Attempt 1 for simple queries that already gathered evidence
@@ -696,10 +880,13 @@ def verify_citations_node(state: RepoMindState):
         else:
             dropped += 1
 
+    citations_used = list(dict.fromkeys(
+        f"{v['file_path']}:L{v['start_line']}-L{v['end_line']}" for v in verified
+    ))
     return {
         "verified_evidence": verified,
         "trace_logs": [
-            f"[Citation Verifier] Kept {len(verified)} valid citations (dropped {dropped} invalid)."
+            f"[Citation Verifier] Kept {len(verified)} valid citations (dropped {dropped} invalid) | citations_used={citations_used}"
         ],
     }
 

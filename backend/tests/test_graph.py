@@ -7,15 +7,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.graph.nodes import (
+    _extract_focused_ast_spans,
+    _gather_lifecycle_candidates,
     input_guardrail_node,
     no_evidence_exit_node,
+    orchestrator_plan_node,
     output_guardrail_node,
     rate_limit_gate_node,
     route_after_input_guardrail,
     route_after_verify_citations,
     verify_citations_node,
 )
-from app.graph.state import RepoMindState
+from app.graph.state import InvestigationPlan, RepoMindState, SpecialistTask
 from app.graph.workflow import repomind_graph
 
 
@@ -82,3 +85,77 @@ def test_no_evidence_exit_and_output_guardrail():
     guard_out = output_guardrail_node({"final_report": dirty_report})
     assert "[REDACTED_NVIDIA_KEY]" in guard_out["final_report"]
     assert ":L1-L1" not in guard_out["final_report"]
+
+
+def test_lifecycle_retrieval_across_files():
+    from app.config import get_repo_full_name, get_repo_root, set_active_repo
+    from app.database import index_repo_symbols
+
+    orig_name = get_repo_full_name()
+    orig_root = get_repo_root()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "app.py").write_text(
+            "from router import match_route\n\n"
+            "def handle_request(path):\n"
+            "    route = match_route(path)\n"
+            "    return dispatch(route)\n",
+            encoding="utf-8",
+        )
+        (root / "router.py").write_text(
+            "def match_route(path):\n"
+            "    return {'path': path}\n",
+            encoding="utf-8",
+        )
+        try:
+            set_active_repo("test/lifecycle", root)
+            index_repo_symbols(
+                "test/lifecycle",
+                [
+                    ("app.py", "def handle_request dispatch"),
+                    ("router.py", "def match_route"),
+                ],
+            )
+            cands = _gather_lifecycle_candidates("test/lifecycle", "Trace request from handle_request through match_route")
+            assert "app.py" in cands
+            assert "router.py" in cands
+            spans = _extract_focused_ast_spans(cands, "Trace request from handle_request through match_route")
+            span_files = {s["file_path"] for s in spans}
+            assert "app.py" in span_files and "router.py" in span_files
+        finally:
+            set_active_repo(orig_name, orig_root)
+
+
+def test_specialist_routing_smallest_set():
+    fake_plan = InvestigationPlan(
+        reasoning="Full trace",
+        tasks=[
+            SpecialistTask(specialist="repository_intelligence", sub_query="Check source"),
+            SpecialistTask(specialist="test_intelligence", sub_query="Check tests"),
+            SpecialistTask(specialist="debugging", sub_query="Check bugs"),
+            SpecialistTask(specialist="change_impact", sub_query="Check impact"),
+        ],
+    )
+    base_state: RepoMindState = {
+        "user_query": "Trace request lifecycle from entry point through dispatch",
+        "actor_id": "test_actor",
+        "attempt_count": 0,
+        "plan_reasoning": "",
+        "tasks": [],
+        "evidence": [],
+        "verified_evidence": [],
+        "is_sufficient": False,
+        "missing_info_feedback": "",
+        "trace_logs": [],
+        "final_report": "",
+    }
+    with patch("app.graph.nodes.structured_invoke", return_value=fake_plan):
+        out_no_test = orchestrator_plan_node(base_state)
+        assert [t["specialist"] for t in out_no_test["tasks"]] == ["repository_intelligence"]
+
+        with_tests = dict(base_state, user_query="Analyze yield dependency lifecycle and cite relevant tests")
+        out_with_test = orchestrator_plan_node(with_tests)
+        assert [t["specialist"] for t in out_with_test["tasks"]] == [
+            "repository_intelligence",
+            "test_intelligence",
+        ]

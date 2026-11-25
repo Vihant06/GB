@@ -12,7 +12,9 @@ from app.database import (
     cache_get,
     cache_put,
     index_markdown_chunks,
+    index_repo_symbols,
     query_doc_chunks_fts,
+    query_repo_symbols_fts,
     check_and_record_query_rate_limit,
     record_external_usage_and_check_cap,
     upsert_external_records,
@@ -31,6 +33,28 @@ def test_sqlite_wal_and_busy_timeout():
             assert timeout >= 5000
         finally:
             conn.close()
+
+
+def test_language_aware_doc_ranking():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "test.db")
+        entries = [
+            ("docs/de/dependencies-with-yield.md", "dependencies yield cleanup"),
+            ("docs/en/dependencies-with-yield.md", "dependencies yield cleanup"),
+            ("fastapi/dependencies/utils.py", "def solve_dependencies yield cleanup"),
+            ("tests/test_yield_dep.py", "def test_yield_cleanup"),
+        ]
+        index_repo_symbols("test/repo", entries, db_path=db_path)
+
+        # English query: production > English doc > test, and German doc pushed after
+        en_hits = [fp for fp, _ in query_repo_symbols_fts("test/repo", "dependencies yield cleanup", limit=3, db_path=db_path)]
+        assert en_hits[0] == "fastapi/dependencies/utils.py"
+        assert "docs/en/dependencies-with-yield.md" in en_hits
+        assert "docs/de/dependencies-with-yield.md" not in en_hits
+
+        # Explicit German request keeps docs/de searchable
+        de_hits = [fp for fp, _ in query_repo_symbols_fts("test/repo", "German docs/de dependencies yield", limit=4, db_path=db_path)]
+        assert "docs/de/dependencies-with-yield.md" in de_hits
 
 
 def test_cache_put_get_and_ttl():
@@ -102,3 +126,25 @@ def test_upsert_external_records():
             assert row[1] == "open"
         finally:
             conn.close()
+
+
+def test_language_aware_doc_ranking():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "test.db")
+        entries = [
+            ("docs/de/dependencies-with-yield.md", "dependencies yield cleanup"),
+            ("docs/en/dependencies-with-yield.md", "dependencies yield cleanup"),
+            ("fastapi/dependencies/utils.py", "def solve_dependencies yield cleanup"),
+            ("tests/test_yield_dep.py", "def test_yield_cleanup"),
+        ]
+        index_repo_symbols("test/repo", entries, db_path=db_path)
+
+        # English query: production > English doc > test, and German doc pushed after
+        en_hits = [fp for fp, _ in query_repo_symbols_fts("test/repo", "dependencies yield cleanup", limit=3, db_path=db_path)]
+        assert en_hits[0] == "fastapi/dependencies/utils.py"
+        assert "docs/en/dependencies-with-yield.md" in en_hits
+        assert "docs/de/dependencies-with-yield.md" not in en_hits
+
+        # Explicit German request keeps docs/de searchable
+        de_hits = [fp for fp, _ in query_repo_symbols_fts("test/repo", "German docs/de dependencies yield", limit=4, db_path=db_path)]
+        assert "docs/de/dependencies-with-yield.md" in de_hits
