@@ -439,11 +439,11 @@ Route the developer's query to 1 to 4 parallel specialist tasks:
 - test_intelligence: existing test cases, assertions, test coverage, and untested methods.
 
 Critical planning rules:
-1. On Attempt 1, if a query combines independent sources (e.g. Firecrawl URL + Context7 docs + local code), dispatch them as SEPARATE parallel tasks.
-2. When the user asks what the repository does, its purpose, architecture, or an overview: dispatch 'repository_intelligence' with a sub_query instructed to list files, read the README, inspect project manifests (package.json, requirements.txt, pyproject.toml), and inspect main entrypoints (e.g. app.js, app.py, main.py).
-3. When the user asks about DATA contained in files, dependencies (requirements.txt, pyproject.toml, package.json), 'list all X', or 'show function/code Y': dispatch 'repository_intelligence' with concrete search_code_pattern / read_project_dependencies / read_file_lines instructions—do NOT dispatch debugging or web search unless an error, issue, or external doc is explicitly requested.
-4. When dispatching a Firecrawl task, keep concrete technical keywords in the sub_query (e.g. 'Transport Adapters HTTPAdapter Retry mount') so FTS5 retrieves the exact section—never ask vaguely for 'full documentation'.
-5. On Attempt 2, ONLY dispatch tasks for the specific gaps listed in Missing Information Feedback; do NOT re-run sources already present in Already Collected Evidence."""
+1. LOCAL-FIRST & SINGLE-SPECIALIST-FIRST: For architecture, lifecycle, or execution-flow questions, start with ONLY 1 task: 'repository_intelligence' searching local production modules first. Do NOT dispatch 'debugging', Exa, or Context7 unless an error/issue/external doc is explicitly asked about or Attempt 1 left a gap.
+2. Only dispatch 'test_intelligence' in parallel if the query explicitly asks about tests or test coverage.
+3. When the user asks what the repository does, its purpose, architecture, or an overview: dispatch 'repository_intelligence' with a sub_query instructed to list files, read the README, inspect project manifests, and inspect main entrypoints.
+4. When the user asks about DATA contained in files, dependencies (requirements.txt, pyproject.toml, package.json), 'list all X', or 'show function/code Y': dispatch 'repository_intelligence' with concrete search_code_pattern / read_project_dependencies / read_file_lines instructions.
+5. On Attempt 2, ONLY dispatch tasks for the specific missing symbol, call site, or gap listed in Missing Information Feedback; do NOT repeat the same broad search."""
 
 
 def orchestrator_plan_node(state: RepoMindState):
@@ -456,7 +456,10 @@ def orchestrator_plan_node(state: RepoMindState):
     fts_hint = ""
     if attempt == 1 and curr_repo:
         try:
-            fts_hits = query_repo_symbols_fts(curr_repo, state["user_query"], limit=6)
+            wants_tests = "test" in state["user_query"].lower()
+            fts_hits = query_repo_symbols_fts(
+                curr_repo, state["user_query"], limit=8, include_tests=wants_tests
+            )
             if fts_hits:
                 hit_lines = [f"- {fp}: {sym[:180]}" for fp, sym in fts_hits]
                 fts_hint = "\n".join(hit_lines)

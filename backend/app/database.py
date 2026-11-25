@@ -402,6 +402,18 @@ def upsert_external_records(records: list[dict], db_path: str | None = None) -> 
             )
 
 
+def _classify_repo_file(file_path: str) -> str:
+    """Classify a repository relative path as 'prod', 'test', or 'doc' for retrieval ranking."""
+    fp = file_path.lower().replace("\\", "/")
+    parts = fp.split("/")
+    name = parts[-1]
+    if any(p in {"tests", "test", "testing"} for p in parts) or name.startswith("test_") or name.endswith("_test.py"):
+        return "test"
+    if any(p in {"docs", "doc", "docs_src", "examples", "example", "benchmarks"} for p in parts) or fp.endswith((".md", ".rst", ".txt")):
+        return "doc"
+    return "prod"
+
+
 def index_repo_symbols(
     repo_name: str,
     entries: list[tuple[str, str]],
@@ -427,8 +439,9 @@ def query_repo_symbols_fts(
     query: str,
     limit: int = 6,
     db_path: str | None = None,
+    include_tests: bool = False,
 ) -> list[tuple[str, str]]:
-    """Fast BM25/FTS5 lookup of candidate repository files and symbols for a query."""
+    """Production-first BM25/FTS5 lookup of candidate repository files and symbols."""
     if not repo_name or not query:
         return []
     init_db(db_path)
@@ -438,14 +451,42 @@ def query_repo_symbols_fts(
     ]
     if not tokens:
         return []
-    fts_expr = " OR ".join(f'"{t}"' for t in tokens[:10])
+    fts_expr = " OR ".join(f'"{t}"' for t in tokens[:12])
+    fetch_limit = max(limit * 6, 30)
     with contextlib.closing(connect_sqlite(db_path)) as conn:
         try:
-            return conn.execute(
+            raw_rows = conn.execute(
                 "SELECT file_path, symbols_text FROM repo_symbols_fts "
                 "WHERE repo_symbols_fts MATCH ? AND repo_name = ? "
                 "ORDER BY bm25(repo_symbols_fts) LIMIT ?",
-                [fts_expr, repo_name, limit],
+                [fts_expr, repo_name, fetch_limit],
             ).fetchall()
         except sqlite3.OperationalError:
             return []
+
+    if not raw_rows:
+        return []
+
+    prod_rows = []
+    test_rows = []
+    doc_rows = []
+    for fp, sym in raw_rows:
+        kind = _classify_repo_file(fp)
+        if kind == "prod":
+            prod_rows.append((fp, sym))
+        elif kind == "test":
+            test_rows.append((fp, sym))
+        else:
+            doc_rows.append((fp, sym))
+
+    if include_tests:
+        # Reserve slots for both production definitions and test files
+        prod_quota = max(1, limit - 2)
+        combined = prod_rows[:prod_quota] + test_rows[:2]
+        if len(combined) < limit:
+            combined += [r for r in (prod_rows[prod_quota:] + test_rows[2:] + doc_rows) if r not in combined]
+        return combined[:limit]
+
+    # Production-first ordering: prod -> test -> doc
+    ordered = prod_rows + test_rows + doc_rows
+    return ordered[:limit]

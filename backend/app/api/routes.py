@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import AsyncGenerator
 
 import anyio
@@ -264,6 +265,9 @@ async def stream_query(
             streamed_live_tokens = False
             sse_queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
+            req_start = time.perf_counter()
+            last_step_t = req_start
+            ttft_ms: int | None = None
 
             def _on_live_token(tok: str) -> None:
                 loop.call_soon_threadsafe(sse_queue.put_nowait, ("token", tok))
@@ -293,12 +297,18 @@ async def stream_query(
                     if kind == "error":
                         raise payload_item
                     if kind == "token":
+                        if not streamed_live_tokens:
+                            ttft_ms = int((time.perf_counter() - req_start) * 1000)
                         streamed_live_tokens = True
                         yield _format_sse("token", {"token": payload_item, "text": payload_item})
                         continue
 
+                    now_t = time.perf_counter()
+                    step_ms = int((now_t - last_step_t) * 1000)
+                    last_step_t = now_t
                     event = payload_item
                     for node_name, node_output in event.items():
+                        logger.info("[SSE Timing] node=%s step_ms=%d total_ms=%d", node_name, step_ms, int((now_t - req_start) * 1000))
                         logs = node_output.get("trace_logs", [])
                         if logs:
                             collected_logs.extend(logs)
@@ -368,6 +378,8 @@ async def stream_query(
                     "total_exa_usd": budget.total_exa_usd,
                 }
 
+                total_ms = int((time.perf_counter() - req_start) * 1000)
+                logger.info("[SSE Timing] complete total_ms=%d ttft_ms=%s", total_ms, ttft_ms)
                 yield _format_sse(
                     "complete",
                     {
@@ -375,6 +387,7 @@ async def stream_query(
                         "text": "",
                         "trace_logs": [_sanitize_log(l) for l in collected_logs],
                         "usage": usage_dict,
+                        "timing_ms": {"total_ms": total_ms, "ttft_ms": ttft_ms},
                         "done": True,
                     },
                 )

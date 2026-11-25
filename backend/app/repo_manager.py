@@ -28,7 +28,7 @@ from app.config import (
     get_repo_root,
     set_active_repo,
 )
-from app.database import index_repo_symbols
+from app.database import _classify_repo_file, index_repo_symbols
 from app.tools.github_sync import sync_github_issues
 
 # Ensure Git LFS smudge is skipped globally to prevent downloading large model binaries
@@ -181,9 +181,18 @@ def clone_and_index_repo(repo_url_or_slug: str) -> Dict[str, Any]:
         if (target_dir / m).exists()
     ]
 
-    # Build fast SQLite FTS5 index of file paths and AST symbols (capped for speed)
+    # Build fast SQLite FTS5 index prioritizing ALL production source files first, then tests & docs
+    prod_py = [f for f in py_files if _classify_repo_file(f) == "prod"]
+    test_py = [f for f in py_files if _classify_repo_file(f) == "test"]
+    doc_py = [f for f in py_files if _classify_repo_file(f) == "doc"]
+    non_py_prod = [f for f in code_files if not f.endswith(".py") and _classify_repo_file(f) == "prod"]
+
+    ordered_files = list(dict.fromkeys(
+        prod_py[:800] + non_py_prod[:200] + test_py[:300] + manifests + doc_files[:50] + doc_py[:50]
+    ))
+
     fts_entries: list[tuple[str, str]] = []
-    for rel_str in (py_files[:300] + [f for f in code_files if not f.endswith(".py")][:150] + doc_files[:50] + manifests):
+    for rel_str in ordered_files:
         fpath = target_dir / rel_str
         if not fpath.is_file():
             continue
