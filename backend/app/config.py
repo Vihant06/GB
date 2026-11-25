@@ -160,21 +160,25 @@ def create_chat_nvidia(model_name: str, max_tokens: int = 8192, temperature: flo
     )
 
 
-def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float = 0.0):
-    """Instantiate a ChatGroq client for ultra-low-latency inference."""
+def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float = 0.0, max_retries: int = 0):
+    """Instantiate a ChatGroq client with zero-sleep retries so fallbacks trigger immediately on 429."""
     from langchain_groq import ChatGroq
     return ChatGroq(
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
+        max_retries=max_retries,
     )
 
 
-# Lazily or direct instantiated clients (mix Groq fast/primary when GROQ_API_KEY is set, else NVIDIA NIM)
+# True hybrid mix: NVIDIA nemotron-3.5-bolt-e4b for multi-step fast_llm tool loops (avoids Groq TPM 429s)
+# + Groq openai/gpt-oss-120b for single-shot synthesis with instant NVIDIA fallback on 429
 try:
     if os.getenv("REPOMIND_PROVIDER", "auto").lower() != "nvidia" and GROQ_API_KEY:
-        fast_llm = create_chat_groq(GROQ_FAST_MODEL, max_tokens=2048, temperature=0.0)
-        llm = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0)
+        nim_fast = create_chat_nvidia(FAST_MODEL, max_tokens=2048, temperature=0.0)
+        groq_primary = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0, max_retries=0)
+        fast_llm = nim_fast
+        llm = groq_primary.with_fallbacks([nim_fast])
     else:
         llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=4096, temperature=0.0)
         fast_llm = create_chat_nvidia(FAST_MODEL, max_tokens=2048, temperature=0.0)

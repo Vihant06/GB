@@ -27,7 +27,7 @@ class SpecialistState(TypedDict):
     report: BaseModel | None
 
 
-def compact_history(messages: list, max_total_chars: int = 9000) -> list:
+def compact_history(messages: list, max_total_chars: int = 4800) -> list:
     """Flatten tool calls and observations into one clean HumanMessage (prevents orphaned ToolMessage errors)."""
     task_text = ""
     findings = []
