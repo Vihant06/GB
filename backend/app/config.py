@@ -143,10 +143,10 @@ CORS_ORIGINS = [
 EXT_CONFIG = ExternalConfig()
 RATE_CFG = RateLimitConfig()
 
-# LLM Models
-PRIMARY_MODEL = os.getenv("REPOMIND_PRIMARY_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
-FAST_MODEL = os.getenv("REPOMIND_FAST_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
-GROQ_FAST_MODEL = os.getenv("REPOMIND_GROQ_FAST_MODEL", "openai/gpt-oss-20b")
+# LLM Models (NVIDIA NIM & Groq mixed defaults)
+PRIMARY_MODEL = os.getenv("REPOMIND_PRIMARY_MODEL", "nvidia/nemotron-3.5-bolt-e4b")
+FAST_MODEL = os.getenv("REPOMIND_FAST_MODEL", "nvidia/nemotron-3.5-bolt-e4b")
+GROQ_FAST_MODEL = os.getenv("REPOMIND_GROQ_FAST_MODEL", "qwen/qwen3.8-27b")
 GROQ_MODEL = os.getenv("REPOMIND_GROQ_MODEL", "openai/gpt-oss-120b")
 
 
@@ -156,7 +156,6 @@ def create_chat_nvidia(model_name: str, max_tokens: int = 8192, temperature: flo
     return ChatNVIDIA(
         model=model_name,
         temperature=temperature,
-        max_tokens=max_tokens,
         max_completion_tokens=max_tokens,
     )
 
@@ -171,17 +170,14 @@ def create_chat_groq(model_name: str, max_tokens: int = 4096, temperature: float
     )
 
 
-# Lazily or direct instantiated clients (prefer Groq for low-latency if GROQ_API_KEY is configured)
+# Lazily or direct instantiated clients (mix Groq fast/primary when GROQ_API_KEY is set, else NVIDIA NIM)
 try:
-    if GROQ_API_KEY:
+    if os.getenv("REPOMIND_PROVIDER", "auto").lower() != "nvidia" and GROQ_API_KEY:
         fast_llm = create_chat_groq(GROQ_FAST_MODEL, max_tokens=2048, temperature=0.0)
-        if os.getenv("REPOMIND_PREFER_NIM_PRIMARY", "false").lower() in ("true", "1", "yes") and NVIDIA_API_KEY:
-            llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
-        else:
-            llm = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0)
+        llm = create_chat_groq(GROQ_MODEL, max_tokens=4096, temperature=0.0)
     else:
-        llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=8192, temperature=0.0)
-        fast_llm = create_chat_nvidia(FAST_MODEL, max_tokens=8192, temperature=0.0)
+        llm = create_chat_nvidia(PRIMARY_MODEL, max_tokens=4096, temperature=0.0)
+        fast_llm = create_chat_nvidia(FAST_MODEL, max_tokens=2048, temperature=0.0)
 except Exception:
     # Allows offline testing/mocking without failing on import
     llm = None  # type: ignore
