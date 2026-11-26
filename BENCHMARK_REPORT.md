@@ -153,3 +153,14 @@ test_dependency_yield_scope_websockets [tests/test_dependency_yield_scope_websoc
 1. **Top-of-File Import Citations vs. Function Bodies:** On Flask 1 and FastAPI 1, `repo_intel_agent` (`bolt-e4b`) stopped after reading lines 1–90 (top-of-file imports) in `app.py` and `routing.py` instead of reading the downstream function definitions (`wsgi_app`, `full_dispatch_request`, `get_request_handler`, `solve_dependencies`). Having `run_repo_intel` detect when all citations in a file are `< L100` (import headers) and automatically pull the matching AST function spans in that file will fix this cleanly.
 2. **FastAPI Prompt 2 Core Source Coverage:** `repository_intelligence` returned 4 items, yet `test_intelligence`'s 6 test items dominated synthesis and `fastapi/dependencies/utils.py` (`solve_dependencies`, `AsyncExitStack`) was still missed.
 3. **Skip Redundant `clone_and_index_repo` on Active Repo Queries:** Avoiding re-indexing on `/query/stream` when `repo_url` already matches the active repo will save ~1.3–3.0 s on every query.
+
+## 7. Concurrent portfolio smoke test — November 26, 2026
+
+One overlapping pair of requests from independent browser tabs. The production frontend build was served on a separate local origin from FastAPI. The repositories were indexed before timing.
+
+| Repository and prompt | Browser completion | Evidence |
+|---|---:|---|
+| Flask WSGI lifecycle | 2.56 s | WSGI entry, URL matching, dispatch, error handling, and teardown at commit `49943b5a94413a530761350f04e896f76e8d620e`. |
+| Regional sentiment tokenizer | 1.22 s | `AutoTokenizer.from_pretrained(MODEL_NAME)` and `xlm-roberta-base` at commit `60493ad012e07bfefb6ceba2efd24c07c0867667`. |
+
+Each browser card pointed to its own repository and pinned SHA. An anonymous attempt to index a repo outside the configured demo allowlist was blocked. API tests also cover invalid and valid owner tokens and denial through direct query routes. These are local smoke-test timings, excluding indexing and host cold starts.

@@ -66,14 +66,16 @@ SpecialistName = Literal[
 
 
 class QueryRouteJudgment(BaseModel):
-    route: Literal["off_topic", "general_coding", "repo_specific"] = Field(
+    route: Literal["off_topic", "general_coding", "web_research", "repo_specific"] = Field(
         description=(
             "'off_topic' for non-coding topics (recipes, travel, movies, etc.); "
-            "'general_coding' for general programming/Python/DSA questions NOT about the indexed repository; "
-            "'repo_specific' ONLY for questions referencing the indexed repository's files, symbols, tests, issues, or CI."
+            "'general_coding' for standalone coding tasks that need no lookup; "
+            "'web_research' for public technical explanations, official examples, docs, or current information; "
+            "'repo_specific' when the answer depends on the linked checkout."
         )
     )
     reason: str = Field(description="One-line explanation for the chosen route.")
+    public_search_query: str = Field(default="", description="Short public keywords for web_research only.")
 
 
 class SpecialistTask(BaseModel):
@@ -101,6 +103,8 @@ class RepoMindState(TypedDict):
     user_query: str
     chat_history: NotRequired[list[dict]]
     conversation_context: NotRequired[str]
+    public_search_query: NotRequired[str]
+    input_decision: NotRequired[dict]
     actor_id: str
     attempt_count: int
     plan_reasoning: str

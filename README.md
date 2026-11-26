@@ -132,6 +132,9 @@ FIRECRAWL_API_KEY=fc-...
 CONTEXT7_API_KEY=ctx7_...
 ```
 
+`FIRECRAWL_API_KEY` enables public web search for questions about framework usage and documentation.
+Those questions bypass repository retrieval. If search is unavailable or rate-limited, RepoMind can still answer from general knowledge.
+
 ### 3. Backend Installation & Startup
 
 Create and activate a virtual environment, then install backend dependencies:
@@ -166,6 +169,21 @@ Open `http://localhost:3000` in your browser. The development server proxies API
 - **Cache:** SQLite and shallow public GitHub checkouts use backend-local storage. Set `REPOMIND_DB_PATH` and `REPOMIND_REPOSITORY_DIR` to use a specific writable directory. The default cache allows eight repositories, configurable with `REPOMIND_MAX_CACHED_REPOS`. This is a repository count limit. No database service or persistent volume is required for the cache. On an empty cache, the backend can fetch a pinned commit again if GitHub still serves it.
 
 Linking a repo returns its commit SHA. The client sends that SHA with each query and uses it in source links. The single-worker backend keeps one checkout per repo. If that checkout holds a different SHA, the query fails with a conflict instead of changing revisions.
+
+**Portfolio access:** Signed-in users can index up to five distinct public GitHub repositories in a rolling 365-day window. A first indexing attempt reserves a slot, and retries or queries for the same repository reuse it. The quota survives restarts when the SQLite database is on persistent storage. Set `REPOMIND_DEMO_REPOS` to customize the suggestions in the picker.
+
+### Email and password sign-in and saved chats
+
+1. In your Supabase project, apply `backend/data/migrations/001_chat_history_auth.sql` and then `002_saved_chat_snapshots.sql`. If migration 001 is already applied, run only migration 002.
+2. In **Supabase → Authentication → Sign In / Providers**, enable Email and allow new signups if visitors may create accounts.
+3. For the current demo, turn **Confirm email** off in the Email settings. RepoMind checks that setting before creating a new account, so it won't start an email-confirmation flow. Previously unconfirmed test accounts may still need to be activated in Supabase.
+4. Set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` on the frontend and restart or rebuild. Use the project's publishable key or legacy anon key.
+5. On a separate backend host, set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` to the same project and public key. A local backend can read the public values from the sibling `frontend/.env.local` when the backend settings are absent. Restart the backend after changing its configuration.
+6. Sign up with a username, email, and password. Sign in with your email and password. RepoMind uses the username for the greeting. Send a message, then open **History** in the side rail after a reload or sign in with the same account on another device. If the sidebar says the saved-chat tables are missing, run the migrations in step 1 in the same Supabase project as the frontend URL, then select **Retry history**.
+
+See the [Supabase password authentication guide](https://supabase.com/docs/guides/auth/passwords) for Email setup.
+
+Saved messages include chat text, the repository revision, and verified citations. Attachment contents stay out of saved history. Supabase row-level security restricts history to its owner.
 
 ---
 

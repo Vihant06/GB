@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from dataclasses import dataclass
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
 # Base project directory (d:\GB)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -161,8 +161,18 @@ EXA_API_KEY = os.getenv("EXA_API_KEY", "")
 CONTEXT7_API_KEY = os.getenv("CONTEXT7_API_KEY", "")
 
 # Supabase Auth & Chat History
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+# A local split checkout can reuse the public values from the frontend settings.
+# Separate deployments set both backend variables explicitly.
+_frontend_auth = {
+    **dotenv_values(BASE_DIR.parent / "frontend" / ".env"),
+    **dotenv_values(BASE_DIR.parent / "frontend" / ".env.local"),
+}
+SUPABASE_URL = os.getenv("SUPABASE_URL") or _frontend_auth.get("VITE_SUPABASE_URL") or ""
+SUPABASE_PUBLISHABLE_KEY = (
+    os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    or _frontend_auth.get("VITE_SUPABASE_PUBLISHABLE_KEY") or ""
+)
+SUPABASE_ANON_KEY = SUPABASE_PUBLISHABLE_KEY
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
 
 # Server & CORS Configuration

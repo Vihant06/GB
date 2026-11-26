@@ -1,11 +1,5 @@
 import {ChatSession, PromptSuggestion} from '../types/chat';
 
-export const CURRENT_USER = {
-  name: 'Wayne',
-  avatar: '/src/assets/images/avatar_wayne_1795282537150.jpg',
-  online: true,
-};
-
 export const SAMPLE_ATTACHMENTS: Array<{
   fileName: string;
   fileSize: string;

@@ -105,6 +105,20 @@ class RunBudgetTracker:
                 time.sleep(wait)
             _GLOBAL_LAST_FIRECRAWL_TS = time.time()
 
+    def try_firecrawl_slot(self) -> bool:
+        """Use the shared Firecrawl rate gate without making an interactive query wait."""
+        global _GLOBAL_LAST_FIRECRAWL_TS
+        if not _GLOBAL_FIRECRAWL_LOCK.acquire(blocking=False):
+            return False
+        try:
+            now = time.time()
+            if now - _GLOBAL_LAST_FIRECRAWL_TS < EXT_CONFIG.firecrawl_min_interval_sec:
+                return False
+            _GLOBAL_LAST_FIRECRAWL_TS = now
+            return True
+        finally:
+            _GLOBAL_FIRECRAWL_LOCK.release()
+
 
 # Request context variable
 _CURRENT_BUDGET: contextvars.ContextVar[RunBudgetTracker | None] = contextvars.ContextVar(

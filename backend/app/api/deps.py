@@ -1,100 +1,56 @@
-"""
-RepoMind request dependencies and identity resolution.
-Resolves actor identity securely from Supabase JWT claims, cryptographic key
-fingerprints, or hashed client IP addresses.
-Prevents caller spoofing and guarantees atomic rate-limit enforcement.
-"""
+"""Authenticate RepoMind requests and authorize repository access."""
 
 from __future__ import annotations
 
-import hashlib
-import logging
 import os
-from typing import Optional
+from uuid import UUID
 
-import jwt as pyjwt
-from fastapi import Depends, Header, HTTPException, Request, status
+import requests
+from fastapi import Depends, Header, HTTPException, status
 
-from app.config import SUPABASE_JWT_SECRET
+from app.config import SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL
 from app.database import check_and_record_query_rate_limit
 
-logger = logging.getLogger(__name__)
-
-_SALT = os.getenv("REPOMIND_IDENTITY_SALT", "repomind_secure_salt_v1")
+_DEFAULT_DEMO_REPOS = "pallets/flask,fastapi/fastapi,encode/starlette,tiangolo/sqlmodel"
 
 
-def get_actor_identity(
-    request: Request,
-    authorization: Optional[str] = Header(None),
-) -> str:
-    """
-    Derive a deterministic, safe actor identifier:
-    0. If SUPABASE_JWT_SECRET is configured and a valid Bearer JWT is present,
-       decode the token and return the ``sub`` claim (Supabase user id).
-    1. Authenticated API key / Bearer token SHA-256 fingerprint (never raw key).
-    2. Hashed client IP address (handling trusted X-Forwarded-For if behind a reverse proxy).
-    3. Explicit local development fallback.
-    """
-    # ----- Supabase JWT authentication path -----
-    if SUPABASE_JWT_SECRET and authorization and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
-        if token:
-            try:
-                payload = pyjwt.decode(
-                    token,
-                    SUPABASE_JWT_SECRET,
-                    algorithms=["HS256"],
-                    audience="authenticated",
-                )
-                user_id: str = payload["sub"]
-                return user_id
-            except pyjwt.ExpiredSignatureError:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has expired.",
-                )
-            except (pyjwt.InvalidTokenError, KeyError) as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Invalid authentication token: {exc}",
-                )
+def demo_repositories() -> list[str]:
+    return list(dict.fromkeys(
+        value.strip().lower()
+        for value in os.getenv("REPOMIND_DEMO_REPOS", _DEFAULT_DEMO_REPOS).split(",")
+        if value.strip()
+    ))
 
-    # ----- Legacy / dev-mode identity resolution -----
-    # 1. Check Authorization header (non-JWT bearer or API key fingerprint)
-    auth_header = (authorization or request.headers.get("Authorization", "")).strip()
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
-        if token:
-            fingerprint = hashlib.sha256((token + _SALT).encode()).hexdigest()[:16]
-            return f"key:{fingerprint}"
 
-    # 2. Check X-API-Key header
-    api_key_header = request.headers.get("X-API-Key", "").strip()
-    if api_key_header:
-        fingerprint = hashlib.sha256((api_key_header + _SALT).encode()).hexdigest()[:16]
-        return f"key:{fingerprint}"
+def get_actor_identity(authorization: str | None = Header(default=None)) -> str:
+    """Resolve the account through Supabase Auth before allowing workspace operations."""
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not token or len(token) > 8192:
+        raise HTTPException(status_code=401, detail="Sign in to use RepoMind.")
+    if not SUPABASE_URL or not SUPABASE_PUBLISHABLE_KEY:
+        raise HTTPException(status_code=503, detail="RepoMind authentication is not configured on the backend.")
 
-    # 3. Development mode fallback
-    if os.getenv("REPOMIND_DEV_MODE", "false").lower() in ("true", "1", "yes"):
-        return "dev_user"
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL.rstrip('/')}/auth/v1/user",
+            headers={"apikey": SUPABASE_PUBLISHABLE_KEY, "Authorization": f"Bearer {token}"},
+            timeout=5,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=503, detail="Could not reach the sign-in service.") from exc
 
-    # 4. Client IP resolution with hashing
-    client_ip = ""
-    # Only trust X-Forwarded-For if explicit proxy trust is enabled
-    trust_proxy = os.getenv("REPOMIND_TRUST_PROXY", "false").lower() in ("true", "1", "yes")
-    if trust_proxy:
-        forwarded = request.headers.get("X-Forwarded-For", "").strip()
-        if forwarded:
-            client_ip = forwarded.split(",")[0].strip()
-
-    if not client_ip and request.client:
-        client_ip = request.client.host
-
-    if not client_ip:
-        client_ip = "127.0.0.1"
-
-    hashed_ip = hashlib.sha256((client_ip + _SALT).encode()).hexdigest()[:16]
-    return f"ip:{hashed_ip}"
+    if response.status_code in (401, 403):
+        raise HTTPException(status_code=401, detail="Your session has expired or is invalid. Sign in again.")
+    if response.status_code != 200:
+        raise HTTPException(status_code=503, detail="The sign-in service could not verify your session.")
+    try:
+        user = response.json()
+        if user.get("role") != "authenticated" or user.get("is_anonymous"):
+            raise ValueError("A permanent account is required")
+        return str(UUID(user["id"]))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="A signed-in account is required.") from exc
 
 
 def enforce_rate_limit(actor_id: str = Depends(get_actor_identity)) -> str:

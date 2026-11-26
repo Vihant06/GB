@@ -1,9 +1,9 @@
 import {ExternalLink, Github, GitBranch, SquarePen} from 'lucide-react';
-import {CURRENT_USER} from '../data/chatData';
 import {RailSection, RepoTarget} from '../types/chat';
 import {Avatar} from './Avatar';
 
 interface TopBarProps {
+  userName: string;
   activeSection: RailSection;
   hasMessages: boolean;
   activeRepo?: RepoTarget | null;
@@ -12,6 +12,7 @@ interface TopBarProps {
 }
 
 export function TopBar({
+  userName,
   activeSection,
   hasMessages,
   activeRepo,
@@ -23,14 +24,13 @@ export function TopBar({
       {/* Left: User greeting */}
       <div className="flex items-center gap-3 min-w-0">
         <Avatar
-          src={CURRENT_USER.avatar}
-          name={CURRENT_USER.name}
+          name={userName}
           bgColor="#D1D5DB"
-          online={CURRENT_USER.online}
+          online
           size="md"
         />
         <h1 className="text-base sm:text-[20px] font-semibold tracking-tight text-[#111111] dark:text-[#ECEBE4] whitespace-nowrap truncate">
-          Hi, {CURRENT_USER.name}👋
+          Hi, {userName} 👋
         </h1>
       </div>
 

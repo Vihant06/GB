@@ -34,11 +34,13 @@ async function startServer() {
       '/query/stream',
       '/health',
       '/repo/index',
+      '/repo/link',
       '/repo/active',
       '/api/query',
       '/api/query/stream',
       '/api/health',
       '/api/repo/index',
+      '/api/repo/link',
       '/api/repo/active',
     ],
     async (req: Request, res: Response) => {
@@ -96,7 +98,10 @@ async function startServer() {
 
       const response = await fetch(`${FASTAPI_URL}/query/stream`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          ...(req.headers.authorization ? {Authorization: req.headers.authorization} : {}),
+        },
         body: JSON.stringify({
           query: queryText,
           repo_url: (body as any).repo_url,
@@ -107,6 +112,7 @@ async function startServer() {
       });
 
       res.setHeader('Content-Type', 'text/event-stream');
+      res.status(response.status);
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
 

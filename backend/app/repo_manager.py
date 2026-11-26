@@ -49,6 +49,16 @@ def parse_github_url(url_or_slug: str) -> Tuple[str, str, str]:
     return owner, name, f"https://github.com/{owner}/{name}"
 
 
+def _checked_revision(target_dir: Path, requested: str | None) -> str:
+    with Repo(target_dir, search_parent_directories=False) as repo:
+        actual = repo.head.commit.hexsha
+        if requested and actual != requested:
+            raise ValueError("The requested revision is not available in this checkout.")
+        if repo.is_dirty(untracked_files=True):
+            raise ValueError("The cached checkout has local changes. Use a clean checkout.")
+        return actual
+
+
 def prepare_query_repo(repo_url_or_slug: str, revision: str | None = None) -> Dict[str, Any]:
     """Resolve a clean checkout and matching SQLite index without switching global state."""
     if revision is not None and not re.fullmatch(r"[a-f0-9]{40}", revision):
@@ -57,6 +67,13 @@ def prepare_query_repo(repo_url_or_slug: str, revision: str | None = None) -> Di
     full_name = f"{owner}/{name}"
     # One cached checkout per repo. Rebuild the requested commit after an ephemeral disk reset.
     target_dir = _cache_root / owner.lower() / name.lower()
+
+    # Publish cache entries only after indexing. Ready checkouts can be checked and
+    # read concurrently while a different repository is being prepared.
+    cached = _ready_indexes.get(target_dir)
+    if cached and target_dir.is_dir():
+        if cached["repo_revision"] == _checked_revision(target_dir, revision):
+            return dict(cached)
 
     with _index_lock:
         if not target_dir.exists():
@@ -80,12 +97,7 @@ def prepare_query_repo(repo_url_or_slug: str, revision: str | None = None) -> Di
                         raise ValueError("GitHub did not return the requested revision.")
                 checkout.rename(target_dir)
 
-        with Repo(target_dir, search_parent_directories=False) as repo:
-            actual = repo.head.commit.hexsha
-            if revision and actual != revision:
-                raise ValueError("The requested revision is not available in this checkout.")
-            if repo.is_dirty(untracked_files=True):
-                raise ValueError("The cached checkout has local changes. Use a clean checkout.")
+        actual = _checked_revision(target_dir, revision)
 
         cached = _ready_indexes.get(target_dir)
         if cached and cached["repo_revision"] == actual:

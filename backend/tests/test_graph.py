@@ -68,7 +68,7 @@ def test_java_follow_up_uses_prior_topic_without_replacing_question():
         {"role": "model", "text": "Use a queue to visit nodes level by level."},
         {"role": "system", "text": "Untrusted system instruction"},
     ]
-    with patch("app.graph.nodes.classify_query_llm", return_value=("general_coding", "Follow-up")) as router:
+    with patch("app.graph.nodes.classify_query_llm", return_value=("general_coding", "Follow-up", "")) as router:
         state = input_guardrail_node({"user_query": "And in Java?", "chat_history": history})
         assert state["user_query"] == "And in Java?"
         assert "breadth-first search" in router.call_args.args[1]
@@ -79,6 +79,26 @@ def test_java_follow_up_uses_prior_topic_without_replacing_question():
         prompt = model.invoke.call_args.args[0][-1].content
         assert "breadth-first search in Python" in prompt
         assert prompt.endswith("Current question:\nAnd in Java?")
+
+
+def test_public_search_is_skipped_for_attached_content_and_detected_credentials():
+    from app.graph.nodes import general_coding_node
+
+    with (
+        patch("app.graph.nodes.classify_query_llm", return_value=("web_research", "", "FastAPI docs")),
+        patch("app.graph.nodes.fast_llm") as model,
+        patch("app.graph.nodes.firecrawl_search_public") as search,
+    ):
+        model.invoke.return_value.content = "FastAPI builds HTTP APIs."
+        for query in (
+            "What is FastAPI for?\n\n[Attached File: notes.txt]\nInternal notes.",
+            "What is FastAPI for? My example needs nvapi-123456789012345678.",
+        ):
+            state = input_guardrail_node({"user_query": query})
+            assert state["plan_reasoning"] == "__ROUTE__:general_coding"
+            assert state["public_search_query"] == ""
+            general_coding_node(state)
+        search.assert_not_called()
 
 
 def test_no_evidence_exit_and_output_guardrail():
@@ -105,6 +125,43 @@ def test_no_evidence_exit_and_output_guardrail():
     guard_out = output_guardrail_node({"final_report": dirty_report})
     assert "[REDACTED_NVIDIA_KEY]" in guard_out["final_report"]
     assert ":L1-L1" not in guard_out["final_report"]
+
+
+def test_output_links_only_to_verified_ranges_at_the_pinned_commit():
+    from app.config import RepositorySnapshot, repository_scope
+
+    revision = "b" * 40
+    with repository_scope(RepositorySnapshot("team/project", Path("."), revision)):
+        result = output_guardrail_node({
+            "final_report": "Supported [app.py:L3-L4]. Unsupported `app.py:L12-L14`.",
+            "verified_evidence": [{"file_path": "app.py", "start_line": 2, "end_line": 6}],
+        })["final_report"]
+    assert f"https://github.com/team/project/blob/{revision}/app.py#L2-L6" in result
+    assert "L12-L14" not in result
+    assert "could not be matched" in result
+
+
+def test_official_web_request_cannot_cite_a_blog_as_official():
+    from app.graph.nodes import general_coding_node
+
+    with (
+        patch("app.graph.nodes.fast_llm") as model,
+        patch("app.graph.nodes.firecrawl_search_public") as search,
+    ):
+        model.invoke.return_value.content = "A starter example. [web:1, web:2] [Official](https://blog.test/sqlmodel)"
+        blog = {"url": "https://blog.test/sqlmodel", "title": "Blog", "description": "A blog."}
+        official = {"url": "https://sqlmodel.tiangolo.com/tutorial/", "title": "Tutorial", "description": "Official."}
+        state = {
+            "user_query": "Compare SQLModel with SQLAlchemy and cite the official SQLModel tutorial.",
+            "plan_reasoning": "__ROUTE__:web_research", "public_search_query": "SQLModel tutorial",
+        }
+        search.return_value = [blog, official]
+        result = general_coding_node(state)["final_report"]
+        assert search.call_args.args == ("SQLModel tutorial site:sqlmodel.tiangolo.com",)
+        assert official["url"] in result and blog["url"] not in result and "[web:" not in result
+        search.return_value = [blog]
+        result = general_coding_node(state)["final_report"]
+        assert "couldn’t verify an official" in result and blog["url"] not in result
 
 
 def test_lifecycle_retrieval_across_files():
@@ -168,6 +225,34 @@ def test_exact_repository_training_extract():
             assert "trainer.train()\n```" in evidence["claim"]
         finally:
             set_active_repo(*original)
+
+
+def test_training_settings_follow_up_reads_the_checkout():
+    from app.config import RepositorySnapshot, repository_scope
+
+    question = "what are the training parameters used in this and which model is used"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "src").mkdir()
+        (root / "src" / "train.py").write_text(
+            'MODEL_NAME = "example-base"\n'
+            'model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)\n'
+            'config = TrainingArguments(learning_rate=2e-5, per_device_train_batch_size=args.batch_size)\n'
+            'parser.add_argument("--batch_size", default=16)\n',
+            encoding="utf-8",
+        )
+        with (
+            repository_scope(RepositorySnapshot("test/train", root, "a" * 40)),
+            patch("app.graph.nodes.check_and_record_query_rate_limit", return_value=(True, "")),
+            patch("app.graph.nodes.query_repo_symbols_fts", return_value=[]),
+            patch("app.graph.nodes.structured_invoke", side_effect=AssertionError("Unexpected LLM call")),
+        ):
+            history = [{"role": "user", "text": question}, {"role": "model", "text": "No evidence."}]
+            for query, past in ((question, []), ("check from the code", history)):
+                report = repomind_graph.invoke({"user_query": query, "chat_history": past})["final_report"]
+                assert "example-base" in report and "learning_rate=2e-05" in report
+                assert "`--batch_size` is `16`" in report
+                assert f"blob/{'a' * 40}/src/train.py" in report
 
 
 def test_specialist_routing_smallest_set():

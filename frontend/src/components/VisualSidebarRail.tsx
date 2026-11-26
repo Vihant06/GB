@@ -1,16 +1,20 @@
-import {Home, LogOut, MessageSquare, Settings} from 'lucide-react';
+import {History, Home, LogOut, MessageSquare, Settings} from 'lucide-react';
 import {RailSection} from '../types/chat';
 
 interface VisualSidebarRailProps {
   activeSection: RailSection;
   hasActiveChat: boolean;
   onSelectSection: (section: RailSection) => void;
+  historyOpen: boolean;
+  onToggleHistory: () => void;
 }
 
 export function VisualSidebarRail({
   activeSection,
   hasActiveChat,
   onSelectSection,
+  historyOpen,
+  onToggleHistory,
 }: VisualSidebarRailProps) {
   const navItems: Array<{
     id: RailSection;
@@ -103,6 +107,12 @@ export function VisualSidebarRail({
             </button>
           );
         })}
+        <button type="button" onClick={onToggleHistory} aria-expanded={historyOpen}
+          aria-controls={historyOpen ? 'chat-history' : undefined}
+          className="flex min-h-10 flex-col items-center justify-center gap-1 rounded-xl px-3 py-1 font-mono text-[11px] text-neutral-700 hover:bg-neutral-100 dark:text-[#ECEBE4] dark:hover:bg-neutral-800 sm:w-full sm:px-0"
+        >
+          <History className="size-5" aria-hidden="true" /> History
+        </button>
       </nav>
 
       <button

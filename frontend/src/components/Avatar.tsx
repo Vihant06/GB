@@ -1,7 +1,7 @@
 import {useState} from 'react';
 
 interface AvatarProps {
-  src: string;
+  src?: string;
   name: string;
   bgColor?: string;
   online?: boolean;
@@ -44,7 +44,7 @@ export function Avatar({
         className="w-full h-full rounded-full border-[1.5px] border-[#111111] dark:border-[#42413A] overflow-hidden flex items-center justify-center font-semibold text-[#111111]"
         style={{backgroundColor: bgColor}}
       >
-        {!imgError ? (
+        {src && !imgError ? (
           <img
             src={src}
             alt={name}

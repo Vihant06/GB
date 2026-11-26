@@ -20,13 +20,13 @@ import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_actor_identity
+from app.api.deps import demo_repositories, get_actor_identity
 from app.budget import get_current_budget, request_budget_scope
 from app.config import BASE_DIR, DB_PATH, RepositorySnapshot, get_repo_full_name, get_repo_root, repository_scope
-from app.database import connect_sqlite, init_db
-from app.graph.nodes import reset_token_callback, set_token_callback
+from app.database import connect_sqlite, init_db, reserve_repository_slot
+from app.graph.nodes import input_guardrail_node, reset_token_callback, set_token_callback
 from app.graph.workflow import repomind_graph
-from app.repo_manager import clone_and_index_repo, get_active_repo_info, prepare_query_repo
+from app.repo_manager import clone_and_index_repo, get_active_repo_info, parse_github_url, prepare_query_repo
 from app.schemas import (
     HealthResponse,
     QueryRequest,
@@ -96,16 +96,33 @@ def _sanitize_log(log: str) -> str:
     return sanitized or log  # fall back to original only if result is empty
 
 
-@router.get("/repo/active")
+@router.get("/repo/active", dependencies=[Depends(get_actor_identity)])
 async def get_active_repository():
     """Retrieve metadata for the operator-configured default repository."""
-    return get_active_repo_info()
+    return {**get_active_repo_info(), "demo_repositories": demo_repositories()}
+
+
+def _public_repository_name(target: str) -> str:
+    try:
+        owner, name, _ = parse_github_url(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Enter a valid GitHub repository URL or slug.") from exc
+    return f"{owner}/{name}"
+
+
+async def _require_repository_slot(actor_id: str, name: str) -> None:
+    if not await anyio.to_thread.run_sync(reserve_repository_slot, actor_id, name):
+        raise HTTPException(
+            status_code=429,
+            detail="Your account can index up to 5 distinct public repositories in 365 days. You can still use your previously indexed repositories.",
+        )
 
 
 @router.post("/repo/index", response_model=RepoIndexResponse)
 @router.post("/repo/link", response_model=RepoIndexResponse)
-async def index_repository(request: RepoIndexRequest):
+async def index_repository(request: RepoIndexRequest, actor_id: str = Depends(get_actor_identity)):
     """Prepare a public GitHub checkout and return its pinned revision."""
+    await _require_repository_slot(actor_id, _public_repository_name(request.repo_url))
     try:
         result = await anyio.to_thread.run_sync(clone_and_index_repo, request.repo_url)
         return RepoIndexResponse(**result)
@@ -153,12 +170,24 @@ def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _resolve_query_snapshot(request: QueryRequest) -> RepositorySnapshot:
+async def _prepare_query(request: QueryRequest, actor_id: str) -> tuple[RepositorySnapshot, dict | None]:
     target = request.repo_url or get_repo_full_name()
+    repo_name = ""
+    if target:
+        repo_name = _public_repository_name(target)
+    elif request.repo_revision:
+        raise HTTPException(status_code=400, detail="A repository is required for a pinned revision.")
+
+    snapshot = RepositorySnapshot(repo_name, BASE_DIR / "data" / ".no-repository")
     if not target:
-        if request.repo_revision:
-            raise HTTPException(status_code=400, detail="A repository is required for a pinned revision.")
-        return RepositorySnapshot("", BASE_DIR / "data" / ".no-repository")
+        return snapshot, None
+    with repository_scope(snapshot):
+        decision = await anyio.to_thread.run_sync(
+            input_guardrail_node, {"user_query": request.query, "chat_history": request.history[-6:]}
+        )
+    if decision.get("plan_reasoning") != "__ROUTE__:repo_specific":
+        return snapshot, decision
+    await _require_repository_slot(actor_id, repo_name)
     try:
         result = await anyio.to_thread.run_sync(prepare_query_repo, target, request.repo_revision)
     except ValueError as exc:
@@ -166,7 +195,7 @@ async def _resolve_query_snapshot(request: QueryRequest) -> RepositorySnapshot:
     except Exception as exc:
         logger.warning("Could not prepare requested repository: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="The requested repository could not be prepared.") from exc
-    return RepositorySnapshot(result["repo_name"], Path(result["repo_path"]), result["repo_revision"])
+    return RepositorySnapshot(result["repo_name"], Path(result["repo_path"]), result["repo_revision"]), decision
 
 
 def _run_graph_sync(initial_state: dict, budget_tracker, snapshot: RepositorySnapshot) -> dict:
@@ -182,11 +211,12 @@ async def execute_query(
     actor_id: str = Depends(get_actor_identity),
 ):
     """Execute a non-streaming query against RepoMind."""
-    snapshot = await _resolve_query_snapshot(request)
+    snapshot, decision = await _prepare_query(request, actor_id)
 
     with request_budget_scope() as budget:
         initial_state = {
             "user_query": request.query,
+            **({"input_decision": decision} if decision is not None else {}),
             "chat_history": request.history[-6:],
             "actor_id": actor_id,
             "attempt_count": 0,
@@ -244,12 +274,14 @@ async def stream_query(
     """
     Stream query execution traces, node progress, tokens, and final engineering report via SSE.
     """
-    snapshot = await _resolve_query_snapshot(request)
+    req_start = time.perf_counter()
+    snapshot, decision = await _prepare_query(request, actor_id)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         with request_budget_scope() as budget:
             initial_state = {
                 "user_query": request.query,
+                **({"input_decision": decision} if decision is not None else {}),
                 "chat_history": request.history[-6:],
                 "actor_id": actor_id,
                 "attempt_count": 0,
@@ -264,8 +296,9 @@ async def stream_query(
             }
 
             # 1. Initial Status Event
-            current_repo_name = snapshot.name
-            status_msg = f"Analyzing query for repository {current_repo_name}..." if current_repo_name else "Analyzing query..."
+            status_msg = "Understanding your question"
+            if decision and decision.get("plan_reasoning") == "__ROUTE__:web_research":
+                status_msg = "Searching public sources"
             yield _format_sse(
                 "status",
                 {"stage": "init", "message": status_msg, "text": "", "repo_revision": snapshot.revision},
@@ -277,7 +310,6 @@ async def stream_query(
             streamed_live_tokens = False
             sse_queue: asyncio.Queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
-            req_start = time.perf_counter()
             last_step_t = req_start
             ttft_ms: int | None = None
 

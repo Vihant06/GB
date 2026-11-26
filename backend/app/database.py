@@ -40,6 +40,28 @@ def connect_sqlite(db_path: str | None = None, timeout: float = 5.0) -> sqlite3.
     return conn
 
 
+def reserve_repository_slot(actor_id: str, repo_name: str, db_path: str | None = None) -> bool:
+    """Reserve one of five distinct GitHub repositories in a rolling 365-day window."""
+    init_db(db_path)
+    now = time.time()
+    with contextlib.closing(connect_sqlite(db_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM account_repository_slots WHERE actor_id = ? AND reserved_at <= ?",
+            (actor_id, now - 365 * 24 * 60 * 60),
+        )
+        repos = conn.execute(
+            "SELECT repo_name FROM account_repository_slots WHERE actor_id = ?", (actor_id,)
+        ).fetchall()
+        repo_name = repo_name.lower()
+        if (repo_name,) in repos:
+            return True
+        if len(repos) >= 5:
+            return False
+        conn.execute("INSERT INTO account_repository_slots VALUES (?, ?, ?)", (actor_id, repo_name, now))
+        return True
+
+
 def init_db(db_path: str | None = None, force: bool = False) -> None:
     """
     Idempotent schema initialization. Runs only once per database file unless force=True.
@@ -56,6 +78,15 @@ def init_db(db_path: str | None = None, force: bool = False) -> None:
                     CREATE TABLE IF NOT EXISTS schema_version (
                         version INTEGER PRIMARY KEY,
                         applied_at REAL NOT NULL
+                    )
+                """)
+
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS account_repository_slots (
+                        actor_id TEXT NOT NULL,
+                        repo_name TEXT NOT NULL,
+                        reserved_at REAL NOT NULL,
+                        PRIMARY KEY (actor_id, repo_name)
                     )
                 """)
 

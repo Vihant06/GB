@@ -8,9 +8,11 @@ Budgets and rate caps are enforced on every invocation.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from typing import Literal
+from urllib.parse import urlsplit
 
 from langchain_core.tools import tool
 import requests
@@ -28,7 +30,7 @@ from app.database import (
     index_markdown_chunks,
     query_doc_chunks_fts,
 )
-from app.guardrails import validate_external_url, wrap_untrusted
+from app.guardrails import redact_secrets, validate_external_url, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +215,70 @@ def exa_search_technical(
     formatted = "\n\n---\n\n".join(blocks)
     cache_put(cache_key, "EXA", results[0].get("url", "EXA:search"), query[:120], formatted)
     return wrap_untrusted(f"EXA mode={search_mode} cost=${cost:.4f}", formatted)
+
+
+def firecrawl_search_public(query: str) -> list[dict[str, str]]:
+    """Find public technical sources with one bounded Firecrawl search request."""
+    api_key = (FIRECRAWL_API_KEY or os.getenv("FIRECRAWL_API_KEY", "")).strip()
+    if not api_key or not query:
+        return []
+    budget = get_current_budget()
+    cache_key = f"firecrawl-search|{query.casefold()}"
+    cached = cache_get(cache_key, EXT_CONFIG.search_cache_ttl_sec)
+    if cached:
+        try:
+            sources = json.loads(cached["content"])
+        except (TypeError, ValueError):
+            sources = None
+        if isinstance(sources, list):
+            budget.record_cache_hit("firecrawl")
+            return sources
+
+    if not budget.try_firecrawl_slot():
+        return []
+    allowed, _ = budget.try_consume("firecrawl", 1)
+    if not allowed:
+        return []
+    try:
+        response = requests.post(
+            "https://api.firecrawl.dev/v2/search",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"query": query, "sources": [{"type": "web"}], "limit": 3, "timeout": 6000},
+            timeout=8,
+            allow_redirects=False,
+        )
+        if response.status_code != 200:
+            logger.info("Firecrawl public search returned HTTP %s", response.status_code)
+            return []
+        payload = response.json()
+        rows = payload.get("data", {}).get("web", []) if isinstance(payload, dict) else []
+    except (requests.RequestException, AttributeError, ValueError):
+        return []
+
+    sources = []
+    for row in (rows if isinstance(rows, list) else [])[:3]:
+        if not isinstance(row, dict):
+            continue
+        source_url, description = row.get("url"), row.get("description")
+        if not isinstance(source_url, str) or not isinstance(description, str) or not description.strip():
+            continue
+        if any(char in source_url for char in '\r\n \t<>()[]'):
+            continue
+        try:
+            parsed = urlsplit(source_url)
+        except ValueError:
+            continue
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname or parsed.username or parsed.password:
+            continue
+        title = row.get("title") if isinstance(row.get("title"), str) else parsed.hostname
+        sources.append({
+            "url": source_url,
+            "title": redact_secrets(title[:120])[0],
+            "description": redact_secrets(description[:900])[0],
+        })
+    if sources:
+        cache_put(cache_key, "FIRECRAWL_SEARCH", sources[0]["url"], "Public web search", json.dumps(sources))
+    return sources
 
 
 @tool
